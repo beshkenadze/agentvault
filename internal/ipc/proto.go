@@ -1,0 +1,64 @@
+// Package ipc defines AgentVault's newline-delimited JSON-RPC framing.
+package ipc
+
+import (
+	"bufio"
+	"encoding/json"
+	"io"
+)
+
+// Request is a single client call. Params is method-specific and may be empty.
+type Request struct {
+	ID     uint64          `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+// Response is the daemon's reply. Exactly one of Result/Error is set.
+type Response struct {
+	ID     uint64          `json:"id"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *RPCError       `json:"error,omitempty"`
+}
+
+// RPCError carries a stable code so the agent can branch (e.g. locked vs denied).
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *RPCError) Error() string { return e.Message }
+
+// Stable error codes (extended in later phases).
+const (
+	CodeInternal     = 1
+	CodeBadRequest   = 2
+	CodeLocked       = 3 // vault locked — agent should ask a human to unlock
+	CodeDenied       = 4 // dangerous-tier denied / no presence
+	CodeUnauthorized = 5 // peer-credential check failed
+)
+
+// Encoder writes newline-delimited JSON values. json.Encoder already appends '\n'.
+type Encoder struct{ enc *json.Encoder }
+
+func NewEncoder(w io.Writer) *Encoder { return &Encoder{enc: json.NewEncoder(w)} }
+func (e *Encoder) Encode(v any) error { return e.enc.Encode(v) }
+
+// Decoder reads newline-delimited JSON values. A bufio.Scanner bounds line length.
+type Decoder struct{ sc *bufio.Scanner }
+
+func NewDecoder(r io.Reader) *Decoder {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1 MiB max line
+	return &Decoder{sc: sc}
+}
+
+func (d *Decoder) Decode(v any) error {
+	if !d.sc.Scan() {
+		if err := d.sc.Err(); err != nil {
+			return err
+		}
+		return io.EOF
+	}
+	return json.Unmarshal(d.sc.Bytes(), v)
+}
