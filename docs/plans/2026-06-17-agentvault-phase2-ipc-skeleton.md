@@ -733,6 +733,16 @@ func main() {
 }
 ```
 
+**Step 3b: Single-instance guard (do NOT clobber a live daemon) — security requirement (I-1)**
+
+`transport.Listen` removes any existing socket file before binding (it can't tell stale from live). So the single-instance check is `daemon.New`'s responsibility, and it MUST run *before* `transport.Listen`:
+
+- Before listening, `daemon.New` try-dials the existing socket path (`transport.Dial`, short timeout).
+- If a live peer answers (dial succeeds) → REFUSE to start: return an error (e.g. `errors.New("avd already running at <path>")`) and do NOT call `transport.Listen`. Clobbering the live socket would silently hijack the running daemon's endpoint.
+- If the dial fails (connection refused / no such file) → the socket is stale (or absent); proceed to `transport.Listen`, which removes the stale file and binds.
+
+Add a corresponding test, `TestSecondInstanceRefuses`: start one server on a path, then call `New(path)` again and assert it returns a non-nil error and does not take over the socket (the first server keeps answering `ping`).
+
 **Step 4: Run, verify pass**
 
 Run: `go test ./internal/daemon/ -v` → PASS. `go build ./...`. `go vet ./...`.

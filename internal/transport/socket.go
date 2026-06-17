@@ -26,8 +26,16 @@ func DefaultSocketPath() (string, error) {
 // Listen creates the parent dir (0700), binds a unix socket at path, and chmods it 0600.
 // A stale socket file is removed first.
 func Listen(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if len(path) >= 104 { // macOS sun_path limit (Linux 108); guard the shortest
+		return nil, fmt.Errorf("socket path too long (%d bytes, max 103): %s", len(path), path)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
+	}
+	// Re-assert 0700 in case the parent dir pre-existed with looser perms.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("chmod socket dir 0700: %w", err)
 	}
 	// Remove a stale socket (caller is responsible for single-instance checks).
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
