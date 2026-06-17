@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/url"
+	"strings"
 )
 
 // allForms returns the raw value plus every encoding we mask.
@@ -17,7 +18,9 @@ func allForms(v string) []string {
 		base64.URLEncoding.EncodeToString(b),
 		base64.RawURLEncoding.EncodeToString(b),
 		hex.EncodeToString(b),
+		strings.ToUpper(hex.EncodeToString(b)),
 		url.QueryEscape(v),
+		url.PathEscape(v),
 		jsonInner(v),
 	}
 }
