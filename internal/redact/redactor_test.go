@@ -33,6 +33,29 @@ func TestRedactorDetectorTier(t *testing.T) {
 	}
 }
 
+func TestRedactorFindingsLongestFirst(t *testing.T) {
+	// Two overlapping findings where the short Secret is a substring of the long one.
+	// If masking ran in this (shorter-first) order, "abc123" would be replaced first,
+	// leaving the trailing "def" exposed and never masking the longer secret whole.
+	// Redact must sort findings longest-first so the longer secret is masked as a unit.
+	det := fakeDetector{findings: []Finding{
+		{Secret: "abc123", Rule: "short"},
+		{Secret: "abc123def", Rule: "long"},
+	}}
+	r := NewRedactor(nil, Options{Detector: det})
+	got := r.Redact("token abc123def end")
+
+	if want := "token {{AV:REDACTED:long}} end"; got != want {
+		t.Errorf("Redact() = %q, want %q (longer finding must be masked whole)", got, want)
+	}
+	if strings.Contains(got, "abc123") {
+		t.Errorf("Redact() = %q, raw secret survived", got)
+	}
+	if strings.Contains(got, "def") {
+		t.Errorf("Redact() = %q, leftover %q exposed after short-first masking", got, "def")
+	}
+}
+
 func TestRedactorExactBeforeDetector(t *testing.T) {
 	// "secretval" is both an issued secret (exact tier) and a detector finding.
 	// Exact runs first, so it must win with {{AV:NAME}}, never the detector mask.

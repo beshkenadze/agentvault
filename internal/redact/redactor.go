@@ -1,6 +1,9 @@
 package redact
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Finding is a secret-like substring discovered by a Detector (e.g. a derived token
 // the vault never issued). Secret is the exact text to mask; Rule names the detector rule.
@@ -35,7 +38,14 @@ func NewRedactor(secrets []Secret, opts Options) *Redactor {
 func (r *Redactor) Redact(s string) string {
 	s = r.exact.Mask(s)
 	if r.det != nil {
-		for _, f := range r.det.Detect(s) {
+		findings := r.det.Detect(s)
+		// Mask longest secrets first so a finding whose Secret contains a shorter
+		// finding's Secret is replaced as a whole, never leaving a partial leak.
+		// Mirrors the longest-first ordering in the exact-match tier (exact.go).
+		sort.Slice(findings, func(i, j int) bool {
+			return len(findings[i].Secret) > len(findings[j].Secret)
+		})
+		for _, f := range findings {
 			if f.Secret == "" {
 				continue
 			}

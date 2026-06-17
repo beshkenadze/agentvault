@@ -701,37 +701,20 @@ Expected: FAIL — `NewRedactor`, `Options`, `Redact` undefined.
 
 **Step 3: Write the implementation**
 
-`internal/redact/redactor.go`:
-```go
-package redact
-
-// Options configures which tiers run.
-type Options struct {
-	Gitleaks bool // run the gitleaks tier after exact-match (default on in production)
-}
-
-// Redactor composes the exact-match tier with the gitleaks tier.
-type Redactor struct {
-	exact *Matcher
-	opts  Options
-	// gl holds the gitleaks detector if Task 6 was GO; nil otherwise.
-}
-
-func NewRedactor(secrets []Secret, opts Options) *Redactor {
-	return &Redactor{exact: NewMatcher(secrets), opts: opts}
-}
-
-// Redact masks a whole string. (Streaming wrapper added when wiring av scrub.)
-func (r *Redactor) Redact(s string) string {
-	s = r.exact.Mask(s)
-	if r.opts.Gitleaks {
-		s = r.maskGitleaks(s) // implemented per Task 6 outcome
-	}
-	return s
-}
-```
-
-Add `maskGitleaks` in a build-tagged or plain file depending on the Task 6 decision; for NO-GO make it `func (r *Redactor) maskGitleaks(s string) string { return s }` with a TODO.
+> **Implemented design (supersedes the original `Options{Gitleaks bool}` + in-package
+> `maskGitleaks` sketch).** The redactor was built with dependency injection so the
+> heavy gitleaks/viper/afero tree never enters `internal/redact`:
+>
+> - `internal/redact` defines a dependency-free `Detector` interface
+>   (`Detect(s string) []Finding`) and `Options{Detector Detector}`. `NewRedactor`
+>   takes the detector; `Redact` runs exact-match first, then masks each detector
+>   `Finding` (longest-first) with `{{AV:REDACTED:<rule>}}`. A nil `Detector` means
+>   exact-match only — no gitleaks coupling.
+> - The gitleaks-backed `Detector` lives in its own package
+>   `internal/detect/gitleaks` (the only place that imports gitleaks). It is wired
+>   into a `Redactor` by the caller (avd later), keeping `internal/redact` — and its
+>   test binary — free of gitleaks. See `internal/detect/gitleaks/gitleaks_test.go`
+>   for the real end-to-end.
 
 **Step 4: Run tests to verify they pass**
 
