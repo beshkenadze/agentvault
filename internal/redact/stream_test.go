@@ -2,8 +2,10 @@ package redact
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeChunks(m *Matcher, chunks ...string) string {
@@ -143,6 +145,78 @@ func TestStreamPrefixOfLonger(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// TestStreamLargeInputIsLinear guards against the O(n^2) DoS. It feeds ~1 MB of a
+// pathological self-overlapping stream (secret "aa", input all 'a's) in many small
+// chunks. The old algorithm recomputed an overlapping straddle scan over the whole
+// growing buffer each Write, which made this run for minutes. The single greedy
+// left-to-right pass is linear, so this must complete well within the deadline. It
+// also asserts the raw secret "aa" never appears in the output.
+func TestStreamLargeInputIsLinear(t *testing.T) {
+	const total = 1 << 20 // ~1 MB
+	const chunk = 64
+
+	m := NewMatcher([]Secret{{Name: "A", Value: "aa"}})
+	input := strings.Repeat("a", total)
+
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var buf bytes.Buffer
+		r := NewStreamRedactor(m, &buf)
+		for i := 0; i < len(input); i += chunk {
+			end := i + chunk
+			if end > len(input) {
+				end = len(input)
+			}
+			if _, err := r.Write([]byte(input[i:end])); err != nil {
+				done <- result{err: err}
+				return
+			}
+		}
+		err := r.Close()
+		done <- result{out: buf.String(), err: err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("stream error: %v", res.err)
+		}
+		if strings.Contains(res.out, "aa") {
+			t.Fatalf("raw secret %q leaked in output", "aa")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("streaming 1 MB took longer than 2s: O(n^2) DoS regression")
+	}
+}
+
+// TestStreamStickyErrorOnDownstreamFailure verifies the io.Writer error contract:
+// once a downstream write fails, the error is sticky and surfaced by every later
+// Write and by Close.
+func TestStreamStickyErrorOnDownstreamFailure(t *testing.T) {
+	m := NewMatcher([]Secret{{Name: "T", Value: "ghp_ABCDEFG"}})
+	want := io.ErrShortWrite
+	r := NewStreamRedactor(m, failingWriter{err: want})
+
+	// Force emittable output (no trailing partial form) so the downstream write runs.
+	if _, err := r.Write([]byte("plain text with no secret\n")); err != want {
+		t.Fatalf("Write err = %v, want %v", err, want)
+	}
+	if _, err := r.Write([]byte("more text\n")); err != want {
+		t.Fatalf("second Write err = %v, want sticky %v", err, want)
+	}
+	if err := r.Close(); err != want {
+		t.Fatalf("Close err = %v, want sticky %v", err, want)
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write(p []byte) (int, error) { return 0, f.err }
 
 func splitBytes(s string) []string {
 	out := make([]string, 0, len(s))
