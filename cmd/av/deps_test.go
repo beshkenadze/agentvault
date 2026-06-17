@@ -14,6 +14,12 @@ func TestAvDoesNotLinkGitleaks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list -deps: %v", err)
 	}
+	// Guard against vacuous pass: confirm go list actually resolved this package's
+	// dependency graph before scanning it (an empty/partial output must not pass).
+	const self = "github.com/beshkenadze/agentvault/cmd/av"
+	if !strings.Contains(string(out), self) {
+		t.Fatalf("go list returned no deps for %s; output=%q", self, out)
+	}
 	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero"} {
 		if strings.Contains(string(out), bad) {
 			t.Errorf("av must not link %q", bad)
