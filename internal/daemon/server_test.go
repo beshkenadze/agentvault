@@ -2,6 +2,10 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,6 +77,54 @@ func TestUnknownMethod(t *testing.T) {
 	ipc.NewDecoder(c).Decode(&resp)
 	if resp.Error == nil || resp.Error.Code != ipc.CodeBadRequest {
 		t.Fatalf("want CodeBadRequest, got %+v", resp.Error)
+	}
+}
+
+// TestHandleRejectsUnverifiedPeer exercises the actual security gate in handle():
+// when the peer-credential check fails, the connection must be rejected with
+// CodeUnauthorized and closed BEFORE any request is dispatched. A foreign UID
+// can't be forged locally, so we inject a forced-reject checkPeer via the seam.
+func TestHandleRejectsUnverifiedPeer(t *testing.T) {
+	path := shortSocketPath(t)
+	srv, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Override the seam BEFORE Serve(): every peer is now rejected, simulating a
+	// foreign UID that the local kernel would never let us forge for real.
+	srv.checkPeer = func(net.Conn) error { return fmt.Errorf("forced reject") }
+	go srv.Serve()
+	defer srv.Close()
+
+	c, err := transport.Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// Send a ping — it must NEVER be dispatched (no "pong" must ever come back).
+	if err := ipc.NewEncoder(c).Encode(ipc.Request{ID: 1, Method: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dec := ipc.NewDecoder(c)
+	var resp ipc.Response
+	if err := dec.Decode(&resp); err != nil {
+		t.Fatalf("expected an unauthorized response, got decode error: %v", err)
+	}
+	// The single response must be the unauthorized rejection, not a pong result.
+	if resp.Error == nil || resp.Error.Code != ipc.CodeUnauthorized {
+		t.Fatalf("want CodeUnauthorized, got error=%+v result=%s", resp.Error, resp.Result)
+	}
+	if resp.Result != nil {
+		t.Fatalf("rejected peer must not receive a dispatched result, got %s", resp.Result)
+	}
+
+	// The connection must then be CLOSED: a subsequent Decode must hit EOF, proving
+	// the ping was never dispatched and no "pong" ever follows the rejection.
+	var after ipc.Response
+	if err := dec.Decode(&after); !errors.Is(err, io.EOF) {
+		t.Fatalf("conn must be closed after reject (want io.EOF), got err=%v resp=%+v", err, after)
 	}
 }
 

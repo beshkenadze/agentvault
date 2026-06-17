@@ -21,6 +21,10 @@ type Server struct {
 	ln       net.Listener
 	lock     *os.File // exclusive flock held for the daemon's lifetime (I-1)
 	lockPath string
+	// checkPeer gates every connection on a peer-credential check. It defaults to
+	// transport.CheckPeer in New; it is an injectable seam so the reject-and-close
+	// security path is testable (a foreign UID can't be forged locally).
+	checkPeer func(net.Conn) error
 }
 
 // New binds the daemon socket at path, enforcing a single instance per socket.
@@ -65,7 +69,7 @@ func New(path string) (*Server, error) {
 		releaseLock(lock, lockPath)
 		return nil, err
 	}
-	return &Server{ln: ln, lock: lock, lockPath: lockPath}, nil
+	return &Server{ln: ln, lock: lock, lockPath: lockPath, checkPeer: transport.CheckPeer}, nil
 }
 
 // releaseLock drops the flock, closes the fd, and best-effort removes the
@@ -93,7 +97,7 @@ func (s *Server) Serve() {
 // (reject-and-close) — it never dispatches a request from an unverified peer.
 func (s *Server) handle(c net.Conn) {
 	defer c.Close()
-	if err := transport.CheckPeer(c); err != nil {
+	if err := s.checkPeer(c); err != nil {
 		_ = ipc.NewEncoder(c).Encode(ipc.Response{
 			Error: &ipc.RPCError{Code: ipc.CodeUnauthorized, Message: "peer rejected"},
 		})
