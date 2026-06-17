@@ -26,7 +26,7 @@ func NewMatcher(secrets []Secret) *Matcher {
 			continue
 		}
 		placeholder := "{{AV:" + s.Name + "}}"
-		for _, form := range formsFor(s.Value) {
+		for _, form := range allForms(s.Value) {
 			if form == "" {
 				continue
 			}
@@ -44,10 +44,6 @@ func NewMatcher(secrets []Secret) *Matcher {
 	sort.Slice(m.ordered, func(i, j int) bool { return len(m.ordered[i]) > len(m.ordered[j]) })
 	return m
 }
-
-// formsFor returns every wire form of a value that should be masked.
-// Task 2 masks only the raw value; Task 3 extends this.
-func formsFor(v string) []string { return []string{v} }
 
 // MaxFormLen is the longest masked form. Stream buffers overlap by at least this-1.
 func (m *Matcher) MaxFormLen() int { return m.maxLen }
