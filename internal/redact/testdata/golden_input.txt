@@ -1,0 +1,5 @@
+raw: SECRET_VALUE_123
+b64: U0VDUkVUX1ZBTFVFXzEyMw==
+hex: 5345435245545f56414c55455f313233
+url: SECRET_VALUE_123
+unrelated commit hash: 7d374bbf00ddeadbeef

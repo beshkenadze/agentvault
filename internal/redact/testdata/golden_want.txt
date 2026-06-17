@@ -1,0 +1,5 @@
+raw: {{AV:S}}
+b64: {{AV:S}}
+hex: {{AV:S}}
+url: {{AV:S}}
+unrelated commit hash: 7d374bbf00ddeadbeef
