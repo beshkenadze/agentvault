@@ -299,6 +299,26 @@ Vault and AWS Secrets Manager backends; an external/dynamic plugin system; the
   streaming string redaction. We may need to depend on its `detect` package and
   rule set directly, or vendor the rules. Confirm feasibility before committing the
   daemon to embed it.
+  - **RESOLVED 2026-06-17 (Task 6 spike) — GO.** gitleaks **v8.30.1** exposes a
+    pure in-memory detection API needing no git and no filesystem:
+    `detect.NewDetectorDefaultConfig() (*Detector, error)` builds a detector with
+    the embedded default rule set in one call (no `ViperConfig.Translate` dance),
+    and `(*Detector).DetectString(s string) []report.Finding` scans a bare string.
+    Each `report.Finding` carries 1-based `StartColumn`/`EndColumn` (plus the raw
+    `Match` and captured `Secret`); for a single-line input `in[StartColumn-1:EndColumn]`
+    reconstructs the secret exactly, so the offsets are directly usable to mask
+    spans as `{{AV:REDACTED:<RuleID>}}`. Verified by `internal/redact/gitleaks_spike_test.go`
+    (github-pat and aws-access-token both detected with correct offsets). For
+    streaming, `(*Detector).DetectReader(io.Reader, bufSize)` and
+    `StreamDetectReader` also exist. **Layer 2 embeds gitleaks as a library.**
+    **Cost:** the dependency tree goes from **1** module (zero external deps) to
+    **202** (`go list -m all`), pulling in a WASM regex runtime
+    (`wasilibs/go-re2` + `tetratelabs/wazero`), the full `spf13/viper`+`cobra`+`pflag`
+    CLI stack, many archive/compression codecs (`mholt/archives`, lz4, xz, brotli,
+    sevenzip, rardecode), and charm TUI libs (`lipgloss`, `termenv`). Large but
+    acceptable: it is linked only into `avd` (the one hardened daemon binary), not
+    into the thin `av` CLI. Revisit if build size or supply-chain surface becomes a
+    concern (the vendor-the-regexes fallback remains available).
 - **Streaming buffer boundary.** Exact-match over a chunked stream needs an overlap
   buffer (see Redaction pipeline). Get this right in both layers or values split
   across reads will leak.
