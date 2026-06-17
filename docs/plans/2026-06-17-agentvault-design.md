@@ -307,8 +307,9 @@ Vault and AWS Secrets Manager backends; an external/dynamic plugin system; the
     Each `report.Finding` carries 1-based `StartColumn`/`EndColumn` (plus the raw
     `Match` and captured `Secret`); for a single-line input `in[StartColumn-1:EndColumn]`
     reconstructs the secret exactly, so the offsets are directly usable to mask
-    spans as `{{AV:REDACTED:<RuleID>}}`. Verified by `internal/redact/gitleaks_spike_test.go`
-    (github-pat and aws-access-token both detected with correct offsets). For
+    spans as `{{AV:REDACTED:<RuleID>}}`. Verified end-to-end by
+    `internal/detect/gitleaks/gitleaks_test.go` (a real github-pat token is masked
+    when the gitleaks detector is injected into a `redact.Redactor`). For
     streaming, `(*Detector).DetectReader(io.Reader, bufSize)` and
     `StreamDetectReader` also exist. **Layer 2 embeds gitleaks as a library.**
     **Cost:** the dependency tree goes from **1** module (zero external deps) to
