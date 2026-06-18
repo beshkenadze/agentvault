@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/beshkenadze/agentvault/internal/audit"
+	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/redact"
 	"github.com/beshkenadze/agentvault/internal/transport"
@@ -49,6 +50,10 @@ type Server struct {
 	// SetResolver (nil until wired): production wires NewResolver(realRegistry,
 	// NewStubPresence(), session); tests wire a mock-backed one.
 	resolver *Resolver
+	// reg is the SAME backend registry the resolver holds, captured in SetResolver so
+	// the "add"/"rm" methods can reach a writable backend (registry.Writer). It is the
+	// write side of resolve's read side: one registry, no second source of truth.
+	reg *backend.Registry
 	// session holds the values issued since unlock; the scrub stream masks against
 	// it. SetResolver captures the resolver's session so scrub redacts the SAME
 	// values resolve issues into (single source of truth).
@@ -91,6 +96,7 @@ func (s *Server) SetResolver(r *Resolver) {
 	s.resolver = r
 	if r != nil {
 		s.session = r.sess
+		s.reg = r.reg // capture the SAME registry so "add"/"rm" reach its writable backends
 	}
 }
 
@@ -136,6 +142,36 @@ func emitScrub(id uint64, cs *connState) ipc.Response {
 // values); a secret value must never reach this helper.
 func errResp(id uint64, code int, msg string) ipc.Response {
 	return ipc.Response{ID: id, Error: &ipc.RPCError{Code: code, Message: msg}}
+}
+
+// errResp2 maps a backend write error to the right RPC code. A missing key on rm is a
+// client fault (CodeBadRequest); anything else is internal. SECURITY: a backend Add/
+// Remove error carries the NAME only (the backend never wraps the value), so err.Error()
+// is safe to return; backend is the backend id, also non-secret.
+func errResp2(id uint64, backendID string, err error) ipc.Response {
+	code := ipc.CodeInternal
+	if errors.Is(err, backend.ErrNotFound) {
+		code = ipc.CodeBadRequest
+	}
+	return errResp(id, code, fmt.Sprintf("%s: %v", backendID, err))
+}
+
+// writer resolves the writable backend for "add"/"rm". It returns either the Writer
+// (rejection nil) or a ready-to-send error Response and nil Writer: the registry not
+// being wired is CodeInternal; an unknown or READ-ONLY backend is CodeBadRequest
+// ("read-only" / "no such backend") — the latter is how a write against 1p/keychain
+// fails fast instead of half-mutating an external store.
+func (s *Server) writer(id uint64, backendID string) (backend.Writer, *ipc.Response) {
+	if s.reg == nil {
+		r := errResp(id, ipc.CodeInternal, "registry not configured")
+		return nil, &r
+	}
+	w, ok := s.reg.Writer(backendID)
+	if !ok {
+		r := errResp(id, ipc.CodeBadRequest, fmt.Sprintf("backend %q is read-only or not registered", backendID))
+		return nil, &r
+	}
+	return w, nil
 }
 
 // New binds the daemon socket at path, enforcing a single instance per socket.
@@ -303,6 +339,39 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		s.session.Lock()
 		s.audit.Log(audit.Event{Kind: "lock"})
 		return statusResponse(req.ID, s.session)
+	case "add":
+		var p ipc.AddParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		w, rejection := s.writer(req.ID, p.Backend)
+		if rejection != nil {
+			return *rejection
+		}
+		// SECURITY: p.Value is the secret; it flows ONLY into the backend's Add. It is
+		// never logged and never reaches an error (Add wraps the name only). The audit
+		// entry below records the name/backend, never the value.
+		if err := w.Add(p.Locator, string(p.Value)); err != nil {
+			return errResp2(req.ID, p.Backend, err)
+		}
+		s.audit.Log(audit.Event{Kind: "add", Name: p.Locator, Profile: p.Backend})
+		ok, _ := json.Marshal("ok")
+		return ipc.Response{ID: req.ID, Result: ok}
+	case "rm":
+		var p ipc.RmParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		w, rejection := s.writer(req.ID, p.Backend)
+		if rejection != nil {
+			return *rejection
+		}
+		if err := w.Remove(p.Locator); err != nil {
+			return errResp2(req.ID, p.Backend, err)
+		}
+		s.audit.Log(audit.Event{Kind: "rm", Name: p.Locator, Profile: p.Backend})
+		ok, _ := json.Marshal("ok")
+		return ipc.Response{ID: req.ID, Result: ok}
 	case "status":
 		if s.session == nil {
 			return errResp(req.ID, ipc.CodeInternal, "session not configured")

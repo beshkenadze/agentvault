@@ -52,6 +52,25 @@ type ResolveResult struct {
 	Values map[string]string `json:"values"`
 }
 
+// AddParams is the client request for `add`: write a secret into a writable backend's
+// vault. Backend is the backend id (e.g. "file") and Locator the name within it.
+// SECURITY: Value carries the plaintext secret — this is the ONLY field that ever
+// does, and it travels solely over the 0600 peer-cred-gated unix socket. It is never
+// logged, never echoed, and never placed in an RPCError. `av` reads it from a TTY
+// (echo off) or stdin, NEVER from argv, so it cannot leak via shell history / ps.
+type AddParams struct {
+	Backend string `json:"backend"`
+	Locator string `json:"locator"`
+	Value   []byte `json:"value"`
+}
+
+// RmParams is the client request for `rm`: delete a secret from a writable backend's
+// vault. It carries no value (removal is by name only), so it can never leak a secret.
+type RmParams struct {
+	Backend string `json:"backend"`
+	Locator string `json:"locator"`
+}
+
 // ScrubParams is one chunk of a streamed scrub request. The client loops sending
 // chunks via the "scrub" method, then flushes the overlap tail at EOF via
 // "scrub_flush" (Data is empty/unused for flush). After a "scrub"/"scrub_flush"

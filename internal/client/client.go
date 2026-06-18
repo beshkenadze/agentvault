@@ -138,6 +138,38 @@ func (c *Client) Status() (locked bool, remaining int, err error) {
 	return r.Locked, r.RemainingSeconds, nil
 }
 
+// Add issues the "add" RPC: it writes value under locator in the given backend's vault.
+// SECURITY: value travels ONLY in the AddParams over the 0600 peer-cred socket; cmd/av
+// reads it from a TTY (echo off) or stdin, NEVER from argv, so it can't leak via shell
+// history / ps. On a daemon error it returns resp.Error (a *ipc.RPCError) so the caller
+// can map its Code (e.g. CodeBadRequest for a read-only backend) to an exit code.
+func (c *Client) Add(backend, locator string, value []byte) error {
+	p, _ := json.Marshal(ipc.AddParams{Backend: backend, Locator: locator, Value: value})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "add", Params: p})
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+// Remove issues the "rm" RPC: it deletes locator from the given backend's vault. It
+// carries no value (removal is by name only). A missing name surfaces as resp.Error
+// with CodeBadRequest so the caller can report it clearly.
+func (c *Client) Remove(backend, locator string) error {
+	p, _ := json.Marshal(ipc.RmParams{Backend: backend, Locator: locator})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "rm", Params: p})
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
 // Ping issues the "ping" RPC and returns the daemon's reply (expected "pong").
 func (c *Client) Ping() (string, error) {
 	resp, err := c.call(ipc.Request{ID: 1, Method: "ping"})

@@ -4,7 +4,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/beshkenadze/agentvault/internal/client"
 	"github.com/beshkenadze/agentvault/internal/ipc"
@@ -49,6 +53,10 @@ func main() {
 		runStatus()
 	case "scrub":
 		runScrub()
+	case "add":
+		runAdd(os.Args[2:])
+	case "rm":
+		runRm(os.Args[2:])
 	default:
 		usage()
 		os.Exit(exitBadRequest)
@@ -56,7 +64,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
 }
 
 func runPing() {
@@ -295,4 +303,132 @@ func parseRunArgs(args []string, profile *string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("no command given")
+}
+
+// runAdd implements `av add [--backend file] NAME`. It reads the VALUE from stdin (if
+// piped) or a TTY prompt with echo OFF — NEVER from argv — and sends it to the daemon,
+// which writes it atomically into the writable backend's vault. The value never lands
+// in shell history / ps because it is never a command-line argument.
+//
+// SECURITY: the only secret is the value, which travels client.Add -> AddParams over
+// the 0600 peer-cred socket. parseAddArgs refuses any second positional so a value
+// passed as an argument is rejected (it would otherwise leak to history/argv).
+func runAdd(args []string) {
+	backend := "file" // the agefile vault is the only writable backend
+	name, err := parseAddArgs(args, &backend)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	value, err := readSecretValue(os.Stdin, stdinIsTTY())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitBadRequest)
+	}
+	if err := dialClient().Add(backend, name, value); err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Printf("added %s\n", name)
+}
+
+// runRm implements `av rm [--backend file] NAME`: it deletes NAME from the writable
+// backend's vault via the daemon. A missing name maps to exit 2 (CodeBadRequest).
+func runRm(args []string) {
+	backend := "file"
+	name, err := parseRmArgs(args, &backend)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	if err := dialClient().Remove(backend, name); err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Printf("removed %s\n", name)
+}
+
+// readSecretValue reads the secret value to store. When stdin is piped (not a TTY) it
+// reads the whole stream and strips a single trailing newline (a here-string / echo
+// adds one) while preserving interior newlines (a multi-line secret). When stdin IS a
+// TTY it prompts and reads with echo OFF via term.ReadPassword, so the value never
+// appears on screen. An empty value is refused (almost certainly a mistake).
+//
+// SECURITY: the value is read ONLY from stdin/TTY — never from argv — so it cannot leak
+// via shell history or the process table. It is returned to the caller and never logged.
+func readSecretValue(stdin io.Reader, stdinIsTTY bool) ([]byte, error) {
+	if stdinIsTTY {
+		fmt.Fprint(os.Stderr, "Value (input hidden): ")
+		v, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr) // ReadPassword swallows the Enter; restore the newline
+		if err != nil {
+			return nil, fmt.Errorf("read value: %w", err)
+		}
+		if len(v) == 0 {
+			return nil, fmt.Errorf("empty value refused")
+		}
+		return v, nil
+	}
+	v, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read value from stdin: %w", err)
+	}
+	v = []byte(strings.TrimSuffix(string(v), "\n"))
+	if len(v) == 0 {
+		return nil, fmt.Errorf("empty value refused (pipe a non-empty value)")
+	}
+	return v, nil
+}
+
+// stdinIsTTY reports whether os.Stdin is a terminal, using the stdlib mode bit (the
+// same approach as stdoutIsTTY) — no extra dependency beyond what term already brings.
+// A pipe or a redirected file is NOT a character device, so this returns false for them.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false // on doubt, treat as non-TTY (read from the pipe)
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// parseAddArgs extracts --backend and the single positional NAME from
+// `av add [--backend B] NAME`. Exactly ONE positional is allowed: a second positional
+// is REFUSED because it would be a value on the command line (leaking to history/argv).
+func parseAddArgs(args []string, backend *string) (string, error) {
+	return parseNameArgs("av add", args, backend)
+}
+
+// parseRmArgs mirrors parseAddArgs for `av rm [--backend B] NAME`.
+func parseRmArgs(args []string, backend *string) (string, error) {
+	return parseNameArgs("av rm", args, backend)
+}
+
+// parseNameArgs is the shared --backend + single-NAME parser for add/rm. It refuses a
+// second positional so a secret value can never be passed as an argument.
+func parseNameArgs(cmd string, args []string, backend *string) (string, error) {
+	var name string
+	have := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--backend":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--backend needs a value")
+			}
+			*backend = args[i+1]
+			i++
+		case len(a) > 10 && a[:10] == "--backend=":
+			*backend = a[10:]
+		default:
+			if have {
+				return "", fmt.Errorf("%s takes exactly one NAME; the value is read from stdin or a TTY prompt, never as an argument", cmd)
+			}
+			name = a
+			have = true
+		}
+	}
+	if !have {
+		return "", fmt.Errorf("%s needs a NAME (use: %s [--backend file] NAME)", cmd, cmd)
+	}
+	return name, nil
 }

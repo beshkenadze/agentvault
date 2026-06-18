@@ -48,3 +48,16 @@ func (r *Registry) List(backendID, prefix string) ([]Meta, error) {
 	}
 	return b.List(prefix)
 }
+
+// Writer returns the registered backend under backendID as a Writer, with ok=true
+// only if it both exists AND supports writes (implements Writer). A read-only backend
+// (1p, keychain) is registered but returns ok=false, so the caller (the "add"/"rm"
+// dispatch) can reject the write rather than half-mutate an external store.
+func (r *Registry) Writer(backendID string) (Writer, bool) {
+	b, ok := r.backends[backendID]
+	if !ok {
+		return nil, false
+	}
+	w, ok := b.(Writer)
+	return w, ok
+}
