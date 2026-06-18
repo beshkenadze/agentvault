@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/beshkenadze/agentvault/internal/adapter"
 	"github.com/beshkenadze/agentvault/internal/client"
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/transport"
@@ -57,6 +58,8 @@ func main() {
 		runAdd(os.Args[2:])
 	case "rm":
 		runRm(os.Args[2:])
+	case "init":
+		runInit(os.Args[2:])
 	default:
 		usage()
 		os.Exit(exitBadRequest)
@@ -64,7 +67,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
 }
 
 func runPing() {
@@ -249,6 +252,82 @@ func runScrub() {
 	if err := client.New(path).Scrub(os.Stdin, os.Stdout); err != nil {
 		os.Exit(exitForError(err))
 	}
+}
+
+// initOptions are the parsed args of `av init`.
+type initOptions struct {
+	agent string // which agent's adapter to generate (e.g. "claude-code", "generic")
+	dir   string // target project dir (cwd by default)
+	force bool   // overwrite existing files instead of refusing
+}
+
+// runInit implements `av init --agent X [--dir D] [--force]`. It GENERATES the named
+// agent's adapter files (hook script + skill/doc + hooks snippet) into the target dir.
+// av stays thin: the templates live in internal/adapter as static strings — no backend,
+// age, or gitleaks dependency. An unknown agent / write conflict maps to exit 2.
+func runInit(args []string) {
+	opt, err := parseInitArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	if err := doInit(opt); err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitBadRequest)
+	}
+}
+
+// doInit resolves the agent's files and writes them under opt.dir, honoring the
+// no-clobber rule unless opt.force is set. It prints the files it created (paths only —
+// no secret is ever involved here).
+func doInit(opt initOptions) error {
+	files, err := adapter.Files(opt.agent)
+	if err != nil {
+		return err
+	}
+	if err := adapter.Write(opt.dir, files, opt.force); err != nil {
+		return err
+	}
+	for _, f := range files {
+		fmt.Printf("wrote %s\n", f.Path)
+	}
+	return nil
+}
+
+// parseInitArgs extracts --agent (required), --dir (default "."), and --force from
+// `av init` args. --agent and --dir accept both `--flag value` and `--flag=value`.
+func parseInitArgs(args []string) (initOptions, error) {
+	opt := initOptions{dir: "."}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--agent":
+			if i+1 >= len(args) {
+				return opt, fmt.Errorf("--agent needs a value")
+			}
+			opt.agent = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--agent="):
+			opt.agent = strings.TrimPrefix(a, "--agent=")
+		case a == "--dir":
+			if i+1 >= len(args) {
+				return opt, fmt.Errorf("--dir needs a value")
+			}
+			opt.dir = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--dir="):
+			opt.dir = strings.TrimPrefix(a, "--dir=")
+		case a == "--force":
+			opt.force = true
+		default:
+			return opt, fmt.Errorf("unexpected argument %q", a)
+		}
+	}
+	if opt.agent == "" {
+		return opt, fmt.Errorf("av init needs --agent (one of: %s)", strings.Join(adapter.KnownAgents(), ", "))
+	}
+	return opt, nil
 }
 
 // parseReadArgs extracts --profile and the single positional NAME from

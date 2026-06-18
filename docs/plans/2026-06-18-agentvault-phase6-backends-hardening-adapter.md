@@ -113,6 +113,38 @@ The payoff: generate the per-agent hook + skill so a real agent uses AgentVault.
 - Tests [TDD]: the generated hook + skill files have the expected shape/content; the scrub-coverage contract is documented (enumerate the channels). 
 - **MANUAL integration:** install the generated hook in a real Claude Code project and confirm a command run via `av run` shows `{{AV:NAME}}` and a value piped through a hooked tool is masked. (This is the real-world proof of the whole project.)
 
+> **Implemented.** Generator lives in `internal/adapter` (pure stdlib: `embed` +
+> `os` — no backend/age/gitleaks, so `av` stays thin; `TestAvStaysThin` still
+> green). The registry (`internal/adapter/adapter.go`) is the SSOT for which agents
+> are supported; adding an agent = a registry entry + template files under
+> `internal/adapter/templates/<agent>/`, no new logic.
+>
+> **Generated for `claude-code`** (into cwd, or `--dir D`):
+> - `.claude/hooks/av-scrub.sh` (0755) — `#!/bin/sh` … `exec av scrub` (layer-2).
+> - `.claude/agentvault.hooks.json` — a **PostToolUse** wiring snippet, explicitly
+>   labeled a TEMPLATE TO MERGE (not an authoritative schema — the Claude Code hook
+>   shape varies by version) that carries the scrub-coverage contract.
+> - `.claude/skills/agentvault/SKILL.md` — tells the agent: use `av run --profile P
+>   -- <cmd>`; pipe tool output through `av scrub`; treat `{{AV:NAME}}` as opaque
+>   (never recover the value); `av read` is for a human TTY only. Includes the
+>   coverage contract (channels that MUST be hooked: Bash/shell, file reads, MCP
+>   tool output, web fetch/search, any future ingress channel).
+>
+> **Generated for `generic`:** `agentvault/av-scrub.sh` (0755) +
+> `agentvault/AGENTVAULT.md` (same contract, no Claude-Code-specific paths).
+>
+> **No-clobber:** `av init` refuses to overwrite an existing file (conflicts detected
+> up front, nothing written) unless `--force` is passed, so a user's customized hook
+> is never destroyed. Unknown agent / write conflict → exit 2, secret-free message.
+>
+> **MANUAL real-world proof (cannot be run by a subagent — needs a live Claude Code
+> session):** in a real Claude Code project, run `av init --agent claude-code`, merge
+> `.claude/agentvault.hooks.json` into your Claude Code settings (adjust the matcher
+> to your version), then (1) confirm a command run via `av run --profile P -- …`
+> shows `{{AV:NAME}}` in place of the value, and (2) read a file / run a tool whose
+> output contains a known secret and confirm the PostToolUse scrub hook masks it
+> before it reaches the model's context.
+
 **Group C done:** add/rm/init tested; generated adapter content verified; manual integration note for the real Claude Code hook.
 
 ---
