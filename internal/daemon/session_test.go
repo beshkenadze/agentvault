@@ -28,3 +28,32 @@ func TestSessionExpiryClears(t *testing.T) {
 		t.Fatal("expired session must not mask old values")
 	}
 }
+
+// A value issued in an expired window must NOT resurface after a re-issue: once the
+// TTL lapses, Issue clears the stale set before recording the new value, so the old
+// secret is dropped (not merely hidden). Uses an injected clock — no wall-clock sleep.
+func TestSessionReissueAfterExpiryDropsOldValue(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	s := NewSession(10 * time.Minute)
+	s.now = func() time.Time { return cur }
+
+	s.Issue("OLD", "oldval") // first Issue rebases the deadline onto the fake clock
+	if s.Expired() {
+		t.Fatal("must not be expired immediately after issue")
+	}
+
+	cur = base.Add(11 * time.Minute) // advance past the deadline
+	if !s.Expired() {
+		t.Fatal("must be expired once the TTL elapses")
+	}
+
+	s.Issue("NEW", "newval") // expired path must clear OLD before recording NEW
+	r := s.Redactor()
+	if got := r.Redact("oldval"); got != "oldval" {
+		t.Fatalf("stale value from an expired window resurfaced: %q", got)
+	}
+	if got := r.Redact("newval"); got == "newval" {
+		t.Fatalf("new value not masked after re-issue: %q", got)
+	}
+}
