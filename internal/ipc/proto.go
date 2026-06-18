@@ -51,6 +51,20 @@ type ResolveResult struct {
 	Values map[string]string `json:"values"`
 }
 
+// ScrubParams is one chunk of a streamed scrub request. The client loops sending
+// chunks (≤256 KiB) via the "scrub" method, then drains the overlap tail at EOF
+// via "scrub_flush" (Data is empty/unused for flush). Data carries raw bytes; only
+// masked bytes flow back in ScrubResult, never a raw secret.
+type ScrubParams struct {
+	Data []byte `json:"data,omitempty"`
+}
+
+// ScrubResult is the masked output for a scrub/scrub_flush request: only redacted
+// bytes, never a raw secret.
+type ScrubResult struct {
+	Masked []byte `json:"masked,omitempty"`
+}
+
 // Encoder writes newline-delimited JSON values. json.Encoder already appends '\n'.
 type Encoder struct{ enc *json.Encoder }
 

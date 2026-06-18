@@ -1,8 +1,10 @@
-// Package daemon implements the avd serve loop. Phase 2 handles only "ping";
-// later phases add resolve/scrub/lock/etc. on the same dispatch.
+// Package daemon implements the avd serve loop. The dispatch handles "ping",
+// "resolve" (broker secrets into the session), and the streaming "scrub"/
+// "scrub_flush" (layer-2 redaction); later phases add lock/etc. on the same dispatch.
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/beshkenadze/agentvault/internal/ipc"
+	"github.com/beshkenadze/agentvault/internal/redact"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
@@ -29,12 +32,31 @@ type Server struct {
 	// SetResolver (nil until wired): production wires NewResolver(realRegistry,
 	// NewStubAuthorizer(), session); tests wire a mock-backed one.
 	resolver *Resolver
+	// session holds the values issued since unlock; the scrub stream masks against
+	// it. SetResolver captures the resolver's session so scrub redacts the SAME
+	// values resolve issues into (single source of truth).
+	session *Session
 }
 
-// SetResolver injects the resolver used by the "resolve" method. Call it after
-// New and before Serve. Keeping New(path) resolver-free preserves the Phase 2
-// constructor (ping/peer-cred/single-instance) unchanged.
-func (s *Server) SetResolver(r *Resolver) { s.resolver = r }
+// SetResolver injects the resolver used by the "resolve" method and captures its
+// session for the scrub stream. Call it after New and before Serve. Keeping
+// New(path) resolver-free preserves the Phase 2 constructor (ping/peer-cred/
+// single-instance) unchanged.
+func (s *Server) SetResolver(r *Resolver) {
+	s.resolver = r
+	if r != nil {
+		s.session = r.sess
+	}
+}
+
+// connState is per-connection scrub state. A connection's scrub stream owns one
+// StreamRedactor writing into buf; the snapshot of the session matcher is taken
+// once at stream start. State is local to handle, so it never leaks across
+// connections (each connection gets a fresh, zero-valued connState).
+type connState struct {
+	sr  *redact.StreamRedactor
+	buf *bytes.Buffer
+}
 
 // errResp builds an error Response. SECURITY: callers must pass only non-secret
 // strings (method/ref/name or err.Error() from the resolver, which excludes
@@ -121,19 +143,22 @@ func (s *Server) handle(c net.Conn) {
 	}
 	dec := ipc.NewDecoder(c)
 	enc := ipc.NewEncoder(c)
+	cs := &connState{} // per-connection scrub state; fresh per connection
 	for {
 		var req ipc.Request
 		if err := dec.Decode(&req); err != nil {
 			return // EOF / closed
 		}
-		if err := enc.Encode(s.dispatch(req)); err != nil {
+		if err := enc.Encode(s.dispatch(cs, req)); err != nil {
 			return
 		}
 	}
 }
 
-// dispatch routes a request to its handler. Phase 2 knows only "ping".
-func (s *Server) dispatch(req ipc.Request) ipc.Response {
+// dispatch routes a request to its handler. cs carries per-connection scrub state;
+// the ping/resolve cases ignore it. Handles "ping", "resolve", and the streaming
+// "scrub"/"scrub_flush".
+func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 	switch req.Method {
 	case "ping":
 		r, _ := json.Marshal("pong")
@@ -157,11 +182,52 @@ func (s *Server) dispatch(req ipc.Request) ipc.Response {
 		}
 		res, _ := json.Marshal(ipc.ResolveResult{Values: vals})
 		return ipc.Response{ID: req.ID, Result: res}
+	case "scrub":
+		var p ipc.ScrubParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		if cs.sr == nil {
+			// Snapshot the session matcher once at stream start; a value split
+			// across chunks is still masked via the retained overlap tail.
+			cs.buf = &bytes.Buffer{}
+			cs.sr = redact.NewStreamRedactor(s.sessionMatcher(), cs.buf)
+		}
+		if _, err := cs.sr.Write(p.Data); err != nil {
+			// SECURITY: only the (non-secret) downstream error text is returned.
+			return errResp(req.ID, ipc.CodeInternal, err.Error())
+		}
+		masked := append([]byte(nil), cs.buf.Bytes()...)
+		cs.buf.Reset()
+		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
+		return ipc.Response{ID: req.ID, Result: res}
+	case "scrub_flush":
+		var masked []byte
+		if cs.sr != nil {
+			if err := cs.sr.Close(); err != nil {
+				cs.sr, cs.buf = nil, nil
+				return errResp(req.ID, ipc.CodeInternal, err.Error())
+			}
+			masked = append([]byte(nil), cs.buf.Bytes()...)
+		}
+		cs.sr, cs.buf = nil, nil // reset stream state for any subsequent scrub
+		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
+		return ipc.Response{ID: req.ID, Result: res}
 	default:
 		return ipc.Response{ID: req.ID, Error: &ipc.RPCError{
 			Code: ipc.CodeBadRequest, Message: "unknown method: " + req.Method,
 		}}
 	}
+}
+
+// sessionMatcher returns the exact-match matcher over the session's currently-valid
+// issued values. With no session wired it returns an empty matcher (scrub masks
+// nothing) rather than panicking — scrub never depends on resolve having run.
+func (s *Server) sessionMatcher() *redact.Matcher {
+	if s.session == nil {
+		return redact.NewMatcher(nil)
+	}
+	return s.session.Matcher()
 }
 
 // Close stops accepting connections and releases the single-instance lock

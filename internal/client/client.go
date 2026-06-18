@@ -17,19 +17,32 @@ type Client struct{ path string }
 // New returns a Client for the daemon socket at path.
 func New(path string) *Client { return &Client{path: path} }
 
-// call dials the daemon, sends one request, and returns the response. If the
-// initial dial fails (no daemon listening), it autostarts avd detached and then
-// retries the dial until the daemon is up or a deadline elapses.
-func (c *Client) call(req ipc.Request) (ipc.Response, error) {
+// dial opens one connection to the daemon, autostarting avd (detached) and
+// retrying if no daemon is listening yet. Callers own the returned conn and must
+// Close it. It is the single dial path shared by one-shot call and the streaming
+// scrub (which needs a persistent connection across multiple requests so the
+// daemon's per-connection scrub state survives the whole stream).
+func (c *Client) dial() (net.Conn, error) {
 	conn, err := transport.Dial(c.path)
 	if err != nil {
 		if serr := autostart(c.path); serr != nil {
-			return ipc.Response{}, fmt.Errorf("dial and autostart failed: %w", serr)
+			return nil, fmt.Errorf("dial and autostart failed: %w", serr)
 		}
 		conn, err = dialRetry(c.path, 2*time.Second)
 		if err != nil {
-			return ipc.Response{}, err
+			return nil, err
 		}
+	}
+	return conn, nil
+}
+
+// call dials the daemon, sends one request, and returns the response (one-shot:
+// the connection is closed afterward). For multi-request streams that need a
+// persistent connection, use dial directly (see scrub.go).
+func (c *Client) call(req ipc.Request) (ipc.Response, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return ipc.Response{}, err
 	}
 	defer conn.Close()
 	if err := ipc.NewEncoder(conn).Encode(req); err != nil {

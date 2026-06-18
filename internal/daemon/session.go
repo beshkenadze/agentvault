@@ -68,6 +68,23 @@ func (s *Session) Redactor() *redact.Redactor {
 	return redact.NewRedactor(secrets, redact.Options{Detector: s.det})
 }
 
+// Matcher returns the exact-match matcher over the currently-valid issued values
+// (empty if expired). It mirrors Redactor but returns the layer-2 streaming matcher
+// for use with redact.NewStreamRedactor, so a secret split across scrub chunks is
+// still masked. NOTE: layer-2 streaming masks by EXACT-MATCH over session values
+// only; gitleaks-on-scrub (the Detector tier) is deferred to Phase 6.
+func (s *Session) Matcher() *redact.Matcher {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var secrets []redact.Secret
+	if !s.expiredLocked() {
+		for name, val := range s.issued {
+			secrets = append(secrets, redact.Secret{Name: name, Value: val})
+		}
+	}
+	return redact.NewMatcher(secrets)
+}
+
 // Lock clears all issued values (used by av lock / TTL expiry / Phase 5 auto-lock).
 func (s *Session) Lock() {
 	s.mu.Lock()
