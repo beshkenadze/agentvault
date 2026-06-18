@@ -15,6 +15,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/audit"
 	"github.com/beshkenadze/agentvault/internal/backend"
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
+	"github.com/beshkenadze/agentvault/internal/backend/keychain"
 	"github.com/beshkenadze/agentvault/internal/backend/onepassword"
 	"github.com/beshkenadze/agentvault/internal/daemon"
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
@@ -157,6 +158,13 @@ func registerBackends(reg *backend.Registry) {
 	// real `op read` and needs `op` installed + signed in (verified manually, not in CI).
 	reg.Register("1p", onepassword.New())
 	registered = append(registered, "1p")
+
+	// Lazy: registering does not invoke `security`. Resolve of av://keychain/... shells
+	// out to the real `security find-generic-password` and needs macOS + a populated
+	// keychain (verified manually, not in CI). On non-darwin builds keychain.New() is the
+	// stub whose Resolve errors "requires macOS", so registration is safe everywhere.
+	reg.Register("keychain", keychain.New())
+	registered = append(registered, "keychain")
 
 	log.Printf("avd: registered backends: %s", strings.Join(registered, " "))
 }
