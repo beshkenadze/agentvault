@@ -20,8 +20,17 @@ func NewResolver(reg *backend.Registry, auth Authorizer, sess *Session) *Resolve
 }
 
 // Resolve parses the manifest, selects the profile, authorizes + resolves each entry,
-// records issued values in the session, and returns name->value. On any authorize
-// failure it returns ErrLocked (so the daemon maps it to CodeLocked) and issues nothing.
+// records issued values in the session, and returns name->value. An authorize/resolve
+// failure returns (nil, err) — the partial RESULT is never returned to the caller (so
+// the daemon maps ErrLocked to CodeLocked). NOTE: it issues to the session per entry as
+// it goes, so with the Phase-4 stub (all-or-nothing authz) a failure issues nothing, but
+// a future per-secret authorizer could leave earlier entries in the session redactor;
+// that is harmless (session values are masking-only, never re-returned).
+//
+// Phase 5 REQUIREMENT: dangerous-tier (manifest.TierDangerous) must NOT be persisted in
+// the session cache ("never cached" per the design). When the real authorizer lands,
+// branch on e.Tier here: issue dangerous values only transiently for the single av run,
+// not into the TTL'd session.
 func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]string, error) {
 	m, err := manifest.Parse(manifestBytes)
 	if err != nil {
