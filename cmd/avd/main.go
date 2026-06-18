@@ -36,16 +36,46 @@ func main() {
 	reg := backend.NewRegistry()
 	registerBackends(reg)
 	sess := daemon.NewSession(sessionTTL)
-	presence := daemon.NewStubPresence()
+
+	// One presence instance is shared by BOTH the unlock RPC (SetPresence) and the
+	// dangerous-tier resolver (NewResolver), so unlock and dangerous-tier resolve go
+	// through the same auth seam. Production uses real Touch ID; AV_TEST_AUTH=allow
+	// selects the env-gated stub so e2e/CI stay automatable without a biometric prompt.
+	presence := selectPresence()
 	srv.SetResolver(daemon.NewResolver(reg, presence, sess))
+	srv.SetPresence(presence)
+
+	// Auto-lock observers (screen-lock/sleep on darwin; no-op elsewhere) re-lock the
+	// SAME session. stop() removes them on shutdown.
+	stopAutoLock := daemon.StartAutoLock(sess)
 
 	go srv.Serve()
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
+	stopAutoLock()
 	srv.Close()
 	os.Remove(path)
+}
+
+// selectPresence returns the presence the daemon authorizes with: the env-gated
+// stub when AV_TEST_AUTH=allow (e2e/CI, no biometric prompt), otherwise the real
+// Touch ID backend. A missing Touch ID backend (e.g. a non-darwin/non-cgo build)
+// is fatal — avd must never run without a real presence check in production.
+//
+// SECURITY: nothing here logs a secret value; only the selection and any
+// construction error (which carries no key material) are logged.
+func selectPresence() daemon.Presence {
+	if os.Getenv("AV_TEST_AUTH") == "allow" {
+		log.Printf("avd: using stub presence (AV_TEST_AUTH=allow)")
+		return daemon.NewStubPresence()
+	}
+	p, err := daemon.NewTouchIDPresence()
+	if err != nil {
+		log.Fatalf("avd: presence: %v", err)
+	}
+	return p
 }
 
 // registerBackends registers the secret backends configured via env. Phase 4 wires

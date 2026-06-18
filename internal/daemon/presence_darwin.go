@@ -28,6 +28,11 @@ func newTouchIDPresence() (Presence, error) {
 	return touchIDPresence{}, nil
 }
 
+// NewTouchIDPresence is the exported constructor cmd/avd wires in production. It
+// delegates to newTouchIDPresence so the build-tagged darwin/non-darwin split
+// stays internal to the package while cmd/avd calls one stable name on every build.
+func NewTouchIDPresence() (Presence, error) { return newTouchIDPresence() }
+
 // Prompt blocks until the user responds to the native LocalAuthentication
 // dialog. success -> nil; user cancel/failure -> ErrDenied; policy
 // unavailable/system error -> ErrLocked.
