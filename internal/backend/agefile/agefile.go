@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"filippo.io/age"
 	"github.com/beshkenadze/agentvault/internal/backend"
@@ -18,6 +19,11 @@ import (
 type Backend struct {
 	id   age.Identity
 	path string
+	// wmu serializes Add/Remove. Each is a load→modify→write-then-rename sequence;
+	// without it, two concurrent writers each load a snapshot and rename their whole
+	// map over the file, dropping the other's entry (lost update). The daemon is the
+	// single writer (single-instance flock), so an in-process mutex is sufficient.
+	wmu sync.Mutex
 }
 
 // New returns a backend that decrypts path with id.
@@ -71,6 +77,8 @@ func (b *Backend) load() (map[string]string, error) {
 // same single reader. The write is atomic (temp + fsync + rename), so a crash mid-
 // write never leaves a partial/corrupt live vault.
 func (b *Backend) Add(name, value string) error {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
 	data, err := b.load()
 	if err != nil {
 		return err
@@ -83,6 +91,8 @@ func (b *Backend) Add(name, value string) error {
 // backend.ErrNotFound if the name is absent, so the caller learns nothing was
 // removed rather than seeing a silent no-op.
 func (b *Backend) Remove(name string) error {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
 	data, err := b.load()
 	if err != nil {
 		return err

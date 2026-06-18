@@ -2,8 +2,10 @@ package agefile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"filippo.io/age"
@@ -38,6 +40,43 @@ func TestAddResolvesBack(t *testing.T) {
 	// The pre-existing entry must survive an Add (Add modifies the map, not replaces it).
 	if g, err := b.Resolve("EXISTING"); err != nil || g.Value != "old" {
 		t.Fatalf("EXISTING after Add = %q, %v; want old, nil", g.Value, err)
+	}
+}
+
+// TestConcurrentAddNoLostUpdate: many concurrent Add calls must all persist. Add is a
+// load→modify→write-then-rename sequence; without serialization each writer would rename
+// its own snapshot+1 over the file, dropping the others (lost update). The wmu mutex
+// serializes them so every entry survives. (The fs-level lost-update is not a Go data
+// race, so -race alone wouldn't catch it — this asserts all entries are present.)
+func TestConcurrentAddNoLostUpdate(t *testing.T) {
+	id, _ := age.GenerateX25519Identity()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault.age")
+	writeEncrypted(t, path, id, map[string]string{})
+
+	b := New(id, path)
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if err := b.Add(fmt.Sprintf("K%02d", i), fmt.Sprintf("v%02d", i)); err != nil {
+				t.Errorf("Add K%02d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("K%02d", i)
+		got, err := b.Resolve(name)
+		if err != nil {
+			t.Fatalf("%s lost (concurrent Add dropped it): %v", name, err)
+		}
+		if got.Value != fmt.Sprintf("v%02d", i) {
+			t.Fatalf("%s = %q, want v%02d", name, got.Value, i)
+		}
 	}
 }
 
