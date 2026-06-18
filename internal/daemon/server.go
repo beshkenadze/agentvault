@@ -268,6 +268,7 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		}
 		masked := append([]byte(nil), cs.buf.Bytes()...)
 		cs.buf.Reset()
+		masked = s.detectScrub(masked)
 		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
 		return ipc.Response{ID: req.ID, Result: res}
 	case "scrub_flush":
@@ -280,6 +281,7 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 			masked = append([]byte(nil), cs.buf.Bytes()...)
 		}
 		cs.sr, cs.buf = nil, nil // reset stream state for any subsequent scrub
+		masked = s.detectScrub(masked)
 		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
 		return ipc.Response{ID: req.ID, Result: res}
 	default:
@@ -309,6 +311,33 @@ func (s *Server) sessionMatcher() *redact.Matcher {
 		return redact.NewMatcher(nil)
 	}
 	return s.session.Matcher()
+}
+
+// detectScrub layers the gitleaks Detector tier (layer 2) on top of an already
+// exact-masked scrub region. The StreamRedactor masks issued SESSION values with
+// cross-chunk overlap (split-safe); this pass catches DERIVED secrets the daemon
+// never issued and dangerous-tier values that are never cached, masking each finding
+// as {{AV:REDACTED:<rule>}} via the same longest-first logic redact.Redactor uses.
+//
+// BOUNDARY LIMITATION (accepted v1 tradeoff): gitleaks runs per flushed region as a
+// WHOLE-STRING pass — it is NOT streaming. A DERIVED secret split across two scrub
+// chunks may be missed at the seam (only the exact-match session-value tier is
+// split-safe via the StreamRedactor's retained overlap tail). Making gitleaks
+// streaming is out of scope; keep this comment if revisiting.
+//
+// A nil Detector (no session, locked/expired session, or none wired) means this pass
+// is a no-op, so a locked session masks nothing here — consistent with sessionMatcher
+// returning an empty matcher for the exact tier.
+func (s *Server) detectScrub(masked []byte) []byte {
+	if s.session == nil || len(masked) == 0 {
+		return masked
+	}
+	det := s.session.Detector()
+	if det == nil {
+		return masked
+	}
+	r := redact.NewRedactor(nil, redact.Options{Detector: det})
+	return []byte(r.Redact(string(masked)))
 }
 
 // Close stops accepting connections and releases the single-instance lock

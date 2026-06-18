@@ -115,9 +115,9 @@ func (s *Session) Redactor() *redact.Redactor {
 // Matcher returns the exact-match matcher over the currently-valid issued values
 // (empty if the session is locked or expired). It mirrors Redactor but returns the
 // layer-2 streaming matcher for use with redact.NewStreamRedactor, so a secret split
-// across scrub chunks is still masked. NOTE: layer-2 streaming masks by EXACT-MATCH
-// over session values only; gitleaks-on-scrub (the Detector tier) is deferred to
-// Phase 6.
+// across scrub chunks is still masked. NOTE: the STREAMING tier masks by EXACT-MATCH
+// over session values only (split-safe); the gitleaks Detector tier is layered on top
+// per flushed region in the scrub handler (see Session.Detector + server.go).
 func (s *Session) Matcher() *redact.Matcher {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,6 +128,19 @@ func (s *Session) Matcher() *redact.Matcher {
 		}
 	}
 	return redact.NewMatcher(secrets)
+}
+
+// Detector returns the session's layer-2 gitleaks detector for the scrub net, or nil
+// when the session is locked/expired or no detector was wired. A nil return means the
+// scrub path masks nothing via the detector tier — so a locked session masks nothing
+// (neither exact-match issued values nor gitleaks findings).
+func (s *Session) Detector() redact.Detector {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lockedLocked() {
+		return nil
+	}
+	return s.det
 }
 
 // Lock re-locks the session and clears all issued values (used by av lock / TTL expiry
