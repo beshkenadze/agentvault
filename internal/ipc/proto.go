@@ -38,6 +38,19 @@ const (
 	CodeUnauthorized = 5 // peer-credential check failed
 )
 
+// ResolveParams is the client request for `resolve`. The thin av sends the raw
+// agentvault.yaml bytes; avd parses them (av links neither yaml nor backends).
+type ResolveParams struct {
+	Profile  string `json:"profile"`
+	Manifest []byte `json:"manifest"` // raw agentvault.yaml bytes
+}
+
+// ResolveResult is the daemon reply: logical name -> secret value. This is the
+// sole intended channel for plaintext values; they never appear in any RPCError.
+type ResolveResult struct {
+	Values map[string]string `json:"values"`
+}
+
 // Encoder writes newline-delimited JSON values. json.Encoder already appends '\n'.
 type Encoder struct{ enc *json.Encoder }
 

@@ -61,6 +61,26 @@ func dialRetry(path string, total time.Duration) (net.Conn, error) {
 	}
 }
 
+// Resolve issues the "resolve" RPC: it sends the profile and the raw
+// agentvault.yaml bytes (av stays thin — avd parses and resolves) and returns
+// the logical name -> value map. On a daemon error it returns resp.Error (a
+// *ipc.RPCError) so the caller can inspect its Code (e.g. CodeLocked/CodeDenied).
+func (c *Client) Resolve(profile string, manifestBytes []byte) (map[string]string, error) {
+	p, _ := json.Marshal(ipc.ResolveParams{Profile: profile, Manifest: manifestBytes})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "resolve", Params: p})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error // caller inspects Code (Locked/Denied)
+	}
+	var r ipc.ResolveResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return nil, err
+	}
+	return r.Values, nil
+}
+
 // Ping issues the "ping" RPC and returns the daemon's reply (expected "pong").
 func (c *Client) Ping() (string, error) {
 	resp, err := c.call(ipc.Request{ID: 1, Method: "ping"})

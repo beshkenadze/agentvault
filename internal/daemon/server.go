@@ -25,6 +25,22 @@ type Server struct {
 	// transport.CheckPeer in New; it is an injectable seam so the reject-and-close
 	// security path is testable (a foreign UID can't be forged locally).
 	checkPeer func(net.Conn) error
+	// resolver issues secrets for the "resolve" method. It is injected via
+	// SetResolver (nil until wired): production wires NewResolver(realRegistry,
+	// NewStubAuthorizer(), session); tests wire a mock-backed one.
+	resolver *Resolver
+}
+
+// SetResolver injects the resolver used by the "resolve" method. Call it after
+// New and before Serve. Keeping New(path) resolver-free preserves the Phase 2
+// constructor (ping/peer-cred/single-instance) unchanged.
+func (s *Server) SetResolver(r *Resolver) { s.resolver = r }
+
+// errResp builds an error Response. SECURITY: callers must pass only non-secret
+// strings (method/ref/name or err.Error() from the resolver, which excludes
+// values); a secret value must never reach this helper.
+func errResp(id uint64, code int, msg string) ipc.Response {
+	return ipc.Response{ID: id, Error: &ipc.RPCError{Code: code, Message: msg}}
 }
 
 // New binds the daemon socket at path, enforcing a single instance per socket.
@@ -122,6 +138,25 @@ func (s *Server) dispatch(req ipc.Request) ipc.Response {
 	case "ping":
 		r, _ := json.Marshal("pong")
 		return ipc.Response{ID: req.ID, Result: r}
+	case "resolve":
+		var p ipc.ResolveParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		if s.resolver == nil {
+			return errResp(req.ID, ipc.CodeInternal, "resolver not configured")
+		}
+		vals, err := s.resolver.Resolve(p.Profile, p.Manifest)
+		if err != nil {
+			code := ipc.CodeInternal
+			if errors.Is(err, ErrLocked) {
+				code = ipc.CodeLocked
+			}
+			// err.Error() carries names/refs only (resolver never wraps values).
+			return errResp(req.ID, code, err.Error())
+		}
+		res, _ := json.Marshal(ipc.ResolveResult{Values: vals})
+		return ipc.Response{ID: req.ID, Result: res}
 	default:
 		return ipc.Response{ID: req.ID, Error: &ipc.RPCError{
 			Code: ipc.CodeBadRequest, Message: "unknown method: " + req.Method,
