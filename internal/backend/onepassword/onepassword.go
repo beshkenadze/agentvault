@@ -91,14 +91,18 @@ func isNotFound(err error) bool {
 	if errors.As(err, &ee) {
 		msg += " " + strings.ToLower(string(ee.Stderr))
 	}
+	// Match only op RESOURCE-specific not-found phrasings. Deliberately fail-closed:
+	// broad substrings ("not found", "no such", "could not find") are NOT matched
+	// because transport/network errors ("host not found", "no such host", "could not
+	// find server") would then be misreported as ErrNotFound — masking a real failure
+	// as "no secret". A genuine not-found we miss just stays a hard error (safe); a
+	// transport error we wrongly call "not found" would silently drop a secret (unsafe).
 	for _, phrase := range []string{
 		"isn't an item",
 		"isn't a field",
-		"not found",
-		"no item",
+		"isn't a vault",
+		"no item matching",
 		"doesn't exist",
-		"could not find",
-		"no such",
 	} {
 		if strings.Contains(msg, phrase) {
 			return true
