@@ -1,0 +1,8 @@
+profiles:
+  smoke:
+    GITHUB_TOKEN:
+      ref: av://file/GITHUB_TOKEN
+      tier: normal
+    STRIPE_SECRET:
+      ref: av://file/STRIPE_SECRET
+      tier: dangerous
