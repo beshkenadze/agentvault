@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/beshkenadze/agentvault/internal/backend"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +59,9 @@ func (m *Manifest) validate() error {
 			}
 			if e.Tier != TierNormal && e.Tier != TierDangerous {
 				return fmt.Errorf("profile %q entry %q: invalid tier %q (want normal|dangerous)", pname, name, e.Tier)
+			}
+			if _, err := backend.ParseRef(e.Ref); err != nil {
+				return fmt.Errorf("profile %q entry %q: %w", pname, name, err)
 			}
 		}
 	}

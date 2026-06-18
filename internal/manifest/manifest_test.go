@@ -39,3 +39,10 @@ func TestRejectsMissingRef(t *testing.T) {
 		t.Fatal("expected error for missing ref")
 	}
 }
+
+func TestRejectsMalformedRef(t *testing.T) {
+	const bad = "profiles:\n  p:\n    X:\n      ref: not-a-ref\n      tier: normal\n"
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error for malformed ref")
+	}
+}

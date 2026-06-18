@@ -9,6 +9,11 @@ import (
 var ErrNotFound = errors.New("secret not found")
 
 // Registry dispatches av:// references to registered backends by backend id.
+//
+// Registration is expected to happen once at startup, before the registry begins
+// serving Resolve/List calls. A Registry is NOT safe for concurrent Register with
+// Resolve/List (or for concurrent Register calls); the daemon (Phase 4) must finish
+// wiring all backends before it starts handling requests.
 type Registry struct {
 	backends map[string]Backend
 }
