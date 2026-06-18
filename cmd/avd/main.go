@@ -2,6 +2,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -67,6 +68,9 @@ func main() {
 	<-ch
 	stopAutoLock()
 	srv.Close()
+	if c, ok := auditLog.(io.Closer); ok {
+		c.Close() // flush/close the audit fd (NopLogger is not a Closer)
+	}
 	os.Remove(path)
 }
 
