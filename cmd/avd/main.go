@@ -19,6 +19,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/backend/onepassword"
 	"github.com/beshkenadze/agentvault/internal/daemon"
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
+	"github.com/beshkenadze/agentvault/internal/enclave"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
@@ -124,7 +125,7 @@ func openAuditLog(socketPath string) audit.Logger {
 }
 
 // registerBackends registers the secret backends. The age-file backend ("file") is
-// wired only when both AV_AGE_IDENTITY and AV_AGE_VAULT are set; if either is unset it
+// wired only when AV_AGE_VAULT is set AND an age identity can be obtained; if not it
 // is skipped (the daemon still runs, and a resolve of av://file/... returns a "no
 // backend registered" error). The 1Password backend ("1p") is registered
 // UNCONDITIONALLY: it is lazy — it never touches the `op` binary at registration time,
@@ -132,21 +133,37 @@ func openAuditLog(socketPath string) audit.Logger {
 // (which then requires `op` installed + signed in; see internal/backend/onepassword).
 // It logs which ids were registered to the daemon's own stderr — NEVER a secret value.
 //
-// SECURITY: the age identity is loaded here only to construct the backend; the plaintext
-// vault is decrypted lazily inside the backend on each Resolve. Phase 6 wraps the
-// identity in the Secure Enclave; this function is the seam for that change.
+// IDENTITY PRECEDENCE (the seam Phase 6 fills with the Secure Enclave):
+//  1. AV_AGE_IDENTITY_ENCLAVE (HARDENED, preferred): a path to a wrapped-identity
+//     BLOB produced by enclave.Wrap. The age key is unwrapped on demand via
+//     enclave.Unwrap, which triggers a LIVE Touch ID (user-presence ACL) — so even
+//     a daemon compromise can't decrypt the vault without the user present. This
+//     REPLACES the plaintext-on-disk identity. (Requires a darwin+cgo build on
+//     Secure Enclave hardware; on any other build enclave.Unwrap returns the
+//     "unavailable" error and the file backend is skipped — it does NOT silently
+//     fall back to plaintext, because the operator explicitly asked for the
+//     hardened path.)
+//  2. AV_AGE_IDENTITY (FALLBACK, Phase 5/4 default): a path to a plaintext age
+//     identity file. Used only when AV_AGE_IDENTITY_ENCLAVE is unset. This keeps
+//     the daemon runnable on non-Enclave setups (and in CI/e2e).
+//
+// SECURITY: the age identity is loaded here only to construct the backend; the
+// plaintext vault is decrypted lazily inside the backend on each Resolve. The
+// unwrapped identity bytes never appear in a log or error; identity-loading errors
+// carry only a path/reason or an OSStatus, never key material.
 func registerBackends(reg *backend.Registry) {
 	registered := []string{}
 
-	idPath := os.Getenv("AV_AGE_IDENTITY")
 	vaultPath := os.Getenv("AV_AGE_VAULT")
+	enclavePath := os.Getenv("AV_AGE_IDENTITY_ENCLAVE")
+	idPath := os.Getenv("AV_AGE_IDENTITY")
 	switch {
-	case idPath == "" || vaultPath == "":
-		log.Printf("avd: no file backend (set AV_AGE_IDENTITY and AV_AGE_VAULT to enable)")
+	case vaultPath == "" || (enclavePath == "" && idPath == ""):
+		log.Printf("avd: no file backend (set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext] to enable)")
 	default:
-		id, err := loadAgeIdentity(idPath)
+		id, err := loadFileBackendIdentity(enclavePath, idPath)
 		if err != nil {
-			// The error carries only the path and a parse reason, never key material.
+			// The error carries only a path/reason or an OSStatus, never key material.
 			log.Printf("avd: file backend disabled: %v", err)
 		} else {
 			reg.Register("file", agefile.New(id, vaultPath))
@@ -167,6 +184,47 @@ func registerBackends(reg *backend.Registry) {
 	registered = append(registered, "keychain")
 
 	log.Printf("avd: registered backends: %s", strings.Join(registered, " "))
+}
+
+// loadFileBackendIdentity resolves the age identity for the file backend following
+// the precedence documented on registerBackends: the Secure-Enclave-wrapped blob
+// (hardened) wins when AV_AGE_IDENTITY_ENCLAVE is set; otherwise the plaintext
+// AV_AGE_IDENTITY file (fallback). Exactly one source is consulted — the hardened
+// path never silently degrades to plaintext.
+func loadFileBackendIdentity(enclavePath, idPath string) (age.Identity, error) {
+	if enclavePath != "" {
+		log.Printf("avd: file backend identity: Secure Enclave (hardened; Touch ID on first resolve)")
+		return loadEnclaveIdentity(enclavePath)
+	}
+	log.Printf("avd: file backend identity: plaintext file (fallback; set AV_AGE_IDENTITY_ENCLAVE to harden)")
+	return loadAgeIdentity(idPath)
+}
+
+// loadEnclaveIdentity reads a wrapped-identity blob from disk, unwraps it with the
+// Secure Enclave (enclave.Unwrap triggers Touch ID via the key's user-presence ACL),
+// and parses the recovered bytes as an age identity. On a non-Enclave build, or if
+// the Enclave is unreachable / the user denies, enclave.Unwrap returns a value-free
+// error and the file backend is skipped.
+//
+// SECURITY: the unwrapped bytes are only handed to age.ParseIdentities; they are
+// never logged. Errors carry a path or an OSStatus, never key material.
+func loadEnclaveIdentity(path string) (age.Identity, error) {
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := enclave.Unwrap(blob)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := age.ParseIdentities(strings.NewReader(string(plaintext)))
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, errNoIdentity
+	}
+	return ids[0], nil
 }
 
 // loadAgeIdentity reads an age identity file and returns its first identity.
