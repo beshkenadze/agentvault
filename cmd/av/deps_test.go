@@ -7,9 +7,10 @@ import (
 )
 
 // The av binary must stay thin: it must never transitively import gitleaks or its
-// heavy tree (wazero, viper, afero). This guards the architecture invariant from
-// the design (gitleaks lives only in avd's path).
-func TestAvDoesNotLinkGitleaks(t *testing.T) {
+// heavy tree (wazero, viper, afero), nor any backend implementation's deps
+// (filippo.io/age). This guards the architecture invariant from the design
+// (gitleaks lives only in avd's path; backends live in avd, never in the thin av).
+func TestAvStaysThin(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {
 		t.Fatalf("go list -deps: %v", err)
@@ -20,7 +21,7 @@ func TestAvDoesNotLinkGitleaks(t *testing.T) {
 	if !strings.Contains(string(out), self) {
 		t.Fatalf("go list returned no deps for %s; output=%q", self, out)
 	}
-	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero"} {
+	for _, bad := range []string{"gitleaks", "wazero", "spf13/viper", "spf13/afero", "filippo.io/age"} {
 		if strings.Contains(string(out), bad) {
 			t.Errorf("av must not link %q", bad)
 		}
