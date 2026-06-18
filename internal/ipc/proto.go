@@ -53,17 +53,28 @@ type ResolveResult struct {
 }
 
 // ScrubParams is one chunk of a streamed scrub request. The client loops sending
-// chunks (≤256 KiB) via the "scrub" method, then drains the overlap tail at EOF
-// via "scrub_flush" (Data is empty/unused for flush). Data carries raw bytes; only
-// masked bytes flow back in ScrubResult, never a raw secret.
+// chunks via the "scrub" method, then flushes the overlap tail at EOF via
+// "scrub_flush" (Data is empty/unused for flush). After a "scrub"/"scrub_flush"
+// whose reply has More set, the client drains the daemon's leftover masked bytes via
+// "scrub_drain" (Data unused) until More is false. Data carries raw bytes; only masked
+// bytes flow back in ScrubResult, never a raw secret.
 type ScrubParams struct {
 	Data []byte `json:"data,omitempty"`
 }
 
-// ScrubResult is the masked output for a scrub/scrub_flush request: only redacted
-// bytes, never a raw secret.
+// ScrubResult is the masked output for a scrub/scrub_flush/scrub_drain request: only
+// redacted bytes, never a raw secret.
+//
+// More signals that the daemon still has masked bytes buffered for this stream that
+// did not fit in this response. Masking can inflate input far beyond a fixed factor —
+// the placeholder is "{{AV:" + Name + "}}" and Name (the user's logical env-var name)
+// is unbounded — so the daemon splits its OWN masked output by byte size to keep every
+// response line under the Decoder's 1 MiB cap, regardless of how much the input
+// inflated. While More is true the client MUST keep calling "scrub_drain" (which sends
+// no further input) until More is false, so all masked bytes are delivered in order.
 type ScrubResult struct {
 	Masked []byte `json:"masked,omitempty"`
+	More   bool   `json:"more,omitempty"`
 }
 
 // StatusResult is the daemon reply for unlock/status (and the ok reply for lock).

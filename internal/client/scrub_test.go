@@ -107,29 +107,35 @@ func newSecretScrubServer(t *testing.T, name, value string) *Client {
 	return New(path)
 }
 
-// TestScrubChunkCapUnderLineLimit is the reply-inflation cap regression: a large input
-// (1 MiB) that is ENTIRELY a 1-byte session secret masks to ~8x its size as the 8-byte
-// placeholder "{{AV:S}}", i.e. ~8 MiB of masked output across chunks. With a naive
-// 256 KiB chunk, a single masked reply line would exceed the daemon Decoder's 1 MiB
-// JSON-RPC cap and the client Decoder would error "token too long". The 64 KiB chunk
-// keeps every reply under the cap, so the whole stream must complete cleanly and the
-// output must be fully masked (no raw 1-byte secret survives, and the placeholder
-// repeats once per input byte).
-func TestScrubChunkCapUnderLineLimit(t *testing.T) {
+// TestScrubReplyInflationUnderLineLimit is the reply-inflation cap regression. The
+// placeholder is "{{AV:" + Name + "}}" = 7 + len(Name) bytes, where Name is the user's
+// LOGICAL env-var name (unbounded). So a 1-byte secret with a realistic name inflates
+// by 7 + len(Name) PER masked byte — NOT a fixed 8x. With a 32-char name the placeholder
+// is 39 bytes (~39x), so a 1 MiB all-secret input masks to ~39 MiB; base64-framed in
+// JSON-RPC that is far past the 1 MiB Decoder line cap.
+//
+// A client-side chunk cap that assumes fixed 8x inflation cannot bound this: the
+// inflation is name-dependent and unbounded. The fix is daemon-side reply splitting —
+// the daemon splits its OWN masked output by byte size so each response line stays under
+// the cap regardless of how much the input inflated. This test asserts the whole stream
+// completes with NO "token too long" and the output is fully masked (no raw secret).
+func TestScrubReplyInflationUnderLineLimit(t *testing.T) {
 	t.Setenv("AV_TEST_AUTH", "allow")
-	// name "X", value "S": a 1-byte secret "S" masks to the 8-byte placeholder
-	// "{{AV:X}}" (~8x inflation). The placeholder does NOT contain "S", so a raw "S"
-	// in the output would be a genuine leak (not the placeholder's own bytes).
+	// A realistic 32-char logical name -> placeholder "{{AV:<32 chars>}}" = 39 bytes,
+	// ~39x inflation for a 1-byte secret. The placeholder does NOT contain the secret
+	// byte, so any raw secret byte in the output is a genuine leak.
+	const name = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" // 32 chars
 	const secret = "S"
-	cl := newSecretScrubServer(t, "X", secret)
+	placeholder := "{{AV:" + name + "}}"
+	cl := newSecretScrubServer(t, name, secret)
 
-	const n = 1 << 20 // 1 MiB of the 1-byte secret repeated -> ~8 MiB masked
+	const n = 1 << 20 // 1 MiB of the 1-byte secret repeated -> ~39 MiB masked
 	in := bytes.NewReader(bytes.Repeat([]byte(secret), n))
 	var out bytes.Buffer
 	if err := cl.Scrub(in, &out); err != nil {
-		// A "token too long" / bufio.ErrTooLong here is the exact failure the chunk cap
-		// prevents; surface it clearly.
-		t.Fatalf("Scrub of large 1-byte-secret input failed (chunk cap regression?): %v", err)
+		// A "token too long" / bufio.ErrTooLong here is the exact failure daemon-side
+		// reply splitting prevents; surface it clearly.
+		t.Fatalf("Scrub of large 1-byte-secret input failed (reply-split regression?): %v", err)
 	}
 
 	// SECURITY: not a single raw secret byte may survive (the whole input was the secret).
@@ -137,7 +143,7 @@ func TestScrubChunkCapUnderLineLimit(t *testing.T) {
 		t.Fatalf("SECURITY: raw 1-byte secret survived scrub")
 	}
 	// Fully masked: exactly n placeholders, nothing else.
-	if want := strings.Repeat("{{AV:X}}", n); out.String() != want {
+	if want := strings.Repeat(placeholder, n); out.String() != want {
 		t.Fatalf("masked output length = %d, want %d (n placeholders)", out.Len(), len(want))
 	}
 }

@@ -29,9 +29,9 @@ func newScrubServer(t *testing.T, name, value string) (string, *Session) {
 	return path, sess
 }
 
-// scrubChunk sends one "scrub" or "scrub_flush" request on conn and returns the
-// masked bytes from the reply.
-func scrubChunk(t *testing.T, enc *ipc.Encoder, dec *ipc.Decoder, id uint64, method string, data []byte) []byte {
+// scrubResult sends one scrub-family request on conn and returns the full reply
+// (masked bytes + the More flag).
+func scrubResult(t *testing.T, enc *ipc.Encoder, dec *ipc.Decoder, id uint64, method string, data []byte) ipc.ScrubResult {
 	t.Helper()
 	params, _ := json.Marshal(ipc.ScrubParams{Data: data})
 	if err := enc.Encode(ipc.Request{ID: id, Method: method, Params: params}); err != nil {
@@ -48,7 +48,14 @@ func scrubChunk(t *testing.T, enc *ipc.Encoder, dec *ipc.Decoder, id uint64, met
 	if err := json.Unmarshal(resp.Result, &r); err != nil {
 		t.Fatal(err)
 	}
-	return r.Masked
+	return r
+}
+
+// scrubChunk sends one "scrub" or "scrub_flush" request on conn and returns the
+// masked bytes from the reply.
+func scrubChunk(t *testing.T, enc *ipc.Encoder, dec *ipc.Decoder, id uint64, method string, data []byte) []byte {
+	t.Helper()
+	return scrubResult(t, enc, dec, id, method, data).Masked
 }
 
 // TestScrubRPCSplitAcrossChunks is the load-bearing test: an issued value is SPLIT
@@ -116,5 +123,74 @@ func TestScrubRPCPerConnectionIsolated(t *testing.T) {
 	out.Write(scrubChunk(t, enc2, dec2, 3, "scrub_flush", nil))
 	if got := out.String(); got != "v={{AV:TOKEN}}" {
 		t.Fatalf("conn 2 output = %q, want v={{AV:TOKEN}}", got)
+	}
+}
+
+// TestScrubRPCReplySplitDrains proves the daemon splits a single large masked reply
+// across multiple responses: the first "scrub" returns More=true (its masked output
+// exceeds maxScrubReplyBytes) and the client drains the rest via "scrub_drain" until
+// More clears. The concatenation of every reply must equal the full masked output,
+// and no reply's masked slice may exceed maxScrubReplyBytes (so each JSON line stays
+// under the 1 MiB cap). The input is one chunk of an issued value repeated, whose
+// placeholder inflation pushes the masked output well past one reply.
+func TestScrubRPCReplySplitDrains(t *testing.T) {
+	const name = "TOKEN"
+	const secret = "S" // 1-byte secret -> 12-byte placeholder "{{AV:TOKEN}}" (~12x inflation)
+	path, _ := newScrubServer(t, name, secret)
+
+	c, err := transport.Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	enc := ipc.NewEncoder(c)
+	dec := ipc.NewDecoder(c)
+
+	// One MODEST raw scrub chunk (256 KiB, well under the 1 MiB request cap even after
+	// base64) whose 1-byte secrets each mask to "{{AV:TOKEN}}" — inflating to ~3 MiB of
+	// masked output, far past maxScrubReplyBytes, so the daemon MUST split the reply.
+	placeholder := "{{AV:" + name + "}}"
+	const reps = 256 * 1024
+	in := bytes.Repeat([]byte(secret), reps)
+	want := bytes.Repeat([]byte(placeholder), reps)
+
+	// First reply: must carry More=true (output exceeds one reply) and be capped.
+	first := scrubResult(t, enc, dec, 1, "scrub", in)
+	if !first.More {
+		t.Fatalf("first scrub reply had More=false; expected a split (masked=%d bytes)", len(first.Masked))
+	}
+	if len(first.Masked) > maxScrubReplyBytes {
+		t.Fatalf("first reply masked=%d exceeds maxScrubReplyBytes=%d", len(first.Masked), maxScrubReplyBytes)
+	}
+
+	var got bytes.Buffer
+	got.Write(first.Masked)
+	// Drain the remaining masked bytes via scrub_drain until More clears.
+	id := uint64(1)
+	for more := first.More; more; {
+		id++
+		r := scrubResult(t, enc, dec, id, "scrub_drain", nil)
+		if len(r.Masked) > maxScrubReplyBytes {
+			t.Fatalf("drain reply masked=%d exceeds maxScrubReplyBytes=%d", len(r.Masked), maxScrubReplyBytes)
+		}
+		got.Write(r.Masked)
+		more = r.More
+	}
+	// Flush the (empty) stream tail; with all input drained it carries no more bytes.
+	id++
+	f := scrubResult(t, enc, dec, id, "scrub_flush", nil)
+	got.Write(f.Masked)
+	for more := f.More; more; {
+		id++
+		r := scrubResult(t, enc, dec, id, "scrub_drain", nil)
+		got.Write(r.Masked)
+		more = r.More
+	}
+
+	if bytes.Contains(got.Bytes(), []byte(secret)) {
+		t.Fatal("SECURITY: raw secret survived a split scrub reply")
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("drained output len=%d, want len=%d (concatenation must equal full masked output)", got.Len(), len(want))
 	}
 }

@@ -93,13 +93,41 @@ func (s *Server) SetResolver(r *Resolver) {
 	}
 }
 
+// maxScrubReplyBytes bounds how many RAW masked bytes the daemon emits in a single
+// scrub reply, so the JSON-RPC line stays under the Decoder's 1 MiB cap (ipc.NewDecoder)
+// no matter how far the input inflated. ScrubResult.Masked is base64-encoded in JSON
+// (factor 4/3), so 512 KiB of raw masked bytes is ~683 KiB of base64 plus a few dozen
+// bytes of JSON framing — comfortably under 1 MiB. This bound is INPUT- and
+// NAME-INDEPENDENT: masking inflation per byte is 7 + len(Name) (placeholder
+// "{{AV:"+Name+"}}") and Name is unbounded, so the client chunk size can never bound
+// the reply; only splitting the daemon's own output by byte size can.
+const maxScrubReplyBytes = 512 * 1024
+
 // connState is per-connection scrub state. A connection's scrub stream owns one
 // StreamRedactor writing into buf; the snapshot of the session matcher is taken
-// once at stream start. State is local to handle, so it never leaks across
-// connections (each connection gets a fresh, zero-valued connState).
+// once at stream start. pending holds masked bytes produced but not yet sent (the
+// daemon splits its output across replies to keep each line under the JSON-RPC cap).
+// State is local to handle, so it never leaks across connections (each connection
+// gets a fresh, zero-valued connState).
 type connState struct {
-	sr  *redact.StreamRedactor
-	buf *bytes.Buffer
+	sr      *redact.StreamRedactor
+	buf     *bytes.Buffer
+	pending []byte
+}
+
+// emitScrub pops up to maxScrubReplyBytes from the FRONT of cs.pending and returns a
+// ScrubResult reply, setting More when masked bytes remain buffered. It is the single
+// place all three scrub methods turn pending bytes into a capped reply (SSOT), so no
+// reply line can exceed the Decoder's 1 MiB cap regardless of input inflation.
+func emitScrub(id uint64, cs *connState) ipc.Response {
+	n := len(cs.pending)
+	if n > maxScrubReplyBytes {
+		n = maxScrubReplyBytes
+	}
+	masked := cs.pending[:n:n]
+	cs.pending = cs.pending[n:]
+	res, _ := json.Marshal(ipc.ScrubResult{Masked: masked, More: len(cs.pending) > 0})
+	return ipc.Response{ID: id, Result: res}
 }
 
 // errResp builds an error Response. SECURITY: callers must pass only non-secret
@@ -215,7 +243,7 @@ func (s *Server) idleDeadline() time.Time {
 
 // dispatch routes a request to its handler. cs carries per-connection scrub state;
 // the ping/resolve cases ignore it. Handles "ping", "resolve", and the streaming
-// "scrub"/"scrub_flush".
+// "scrub"/"scrub_flush"/"scrub_drain".
 func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 	switch req.Method {
 	case "ping":
@@ -297,21 +325,30 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		masked := append([]byte(nil), cs.buf.Bytes()...)
 		cs.buf.Reset()
 		masked = s.detectScrub(masked)
-		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
-		return ipc.Response{ID: req.ID, Result: res}
+		// Buffer the masked bytes and emit only a capped slice this reply; the client
+		// drains the rest via "scrub_drain". Splitting the daemon's OWN output keeps
+		// every reply under the cap no matter how far masking inflated the input.
+		cs.pending = append(cs.pending, masked...)
+		return emitScrub(req.ID, cs)
 	case "scrub_flush":
 		var masked []byte
 		if cs.sr != nil {
 			if err := cs.sr.Close(); err != nil {
-				cs.sr, cs.buf = nil, nil
+				cs.sr, cs.buf, cs.pending = nil, nil, nil
 				return errResp(req.ID, ipc.CodeInternal, err.Error())
 			}
 			masked = append([]byte(nil), cs.buf.Bytes()...)
 		}
 		cs.sr, cs.buf = nil, nil // reset stream state for any subsequent scrub
 		masked = s.detectScrub(masked)
-		res, _ := json.Marshal(ipc.ScrubResult{Masked: masked})
-		return ipc.Response{ID: req.ID, Result: res}
+		cs.pending = append(cs.pending, masked...)
+		// More may stay true here: the client keeps draining via "scrub_drain" until it
+		// clears, so even the flushed tail can exceed one reply for a high-inflation name.
+		return emitScrub(req.ID, cs)
+	case "scrub_drain":
+		// Emit the next capped slice of already-masked bytes the daemon buffered for this
+		// stream (no new input). The client loops this while the reply's More is set.
+		return emitScrub(req.ID, cs)
 	default:
 		return ipc.Response{ID: req.ID, Error: &ipc.RPCError{
 			Code: ipc.CodeBadRequest, Message: "unknown method: " + req.Method,
