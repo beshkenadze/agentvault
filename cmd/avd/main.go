@@ -36,8 +36,8 @@ func main() {
 	reg := backend.NewRegistry()
 	registerBackends(reg)
 	sess := daemon.NewSession(sessionTTL)
-	auth := daemon.NewStubAuthorizer()
-	srv.SetResolver(daemon.NewResolver(reg, auth, sess))
+	presence := daemon.NewStubPresence()
+	srv.SetResolver(daemon.NewResolver(reg, presence, sess))
 
 	go srv.Serve()
 

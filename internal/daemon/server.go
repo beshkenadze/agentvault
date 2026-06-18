@@ -30,7 +30,7 @@ type Server struct {
 	checkPeer func(net.Conn) error
 	// resolver issues secrets for the "resolve" method. It is injected via
 	// SetResolver (nil until wired): production wires NewResolver(realRegistry,
-	// NewStubAuthorizer(), session); tests wire a mock-backed one.
+	// NewStubPresence(), session); tests wire a mock-backed one.
 	resolver *Resolver
 	// session holds the values issued since unlock; the scrub stream masks against
 	// it. SetResolver captures the resolver's session so scrub redacts the SAME

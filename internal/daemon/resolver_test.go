@@ -30,7 +30,7 @@ func TestResolveProfile(t *testing.T) {
 	reg := backend.NewRegistry()
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz"}})
 	sess := NewSession(15 * time.Minute)
-	rv := NewResolver(reg, NewStubAuthorizer(), sess)
+	rv := NewResolver(reg, NewStubPresence(), sess)
 
 	vals, err := rv.Resolve("smoke", []byte(manifestYAML))
 	if err != nil {
@@ -49,8 +49,8 @@ func TestResolveDeniedWhenLocked(t *testing.T) {
 	t.Setenv("AV_TEST_AUTH", "") // not allowed
 	reg := backend.NewRegistry()
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "x"}})
-	rv := NewResolver(reg, NewStubAuthorizer(), NewSession(time.Minute))
+	rv := NewResolver(reg, NewStubPresence(), NewSession(time.Minute))
 	if _, err := rv.Resolve("smoke", []byte(manifestYAML)); err == nil {
-		t.Fatal("locked authorizer must fail resolve")
+		t.Fatal("locked presence must fail resolve")
 	}
 }

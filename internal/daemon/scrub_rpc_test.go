@@ -22,7 +22,7 @@ func newScrubServer(t *testing.T, name, value string) (string, *Session) {
 	sess := NewSession(15 * time.Minute)
 	sess.Issue(name, value)
 	// Wire a resolver over the same session so the Server captures it for scrub.
-	srv.SetResolver(NewResolver(nil, NewStubAuthorizer(), sess))
+	srv.SetResolver(NewResolver(nil, NewStubPresence(), sess))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
 	return path, sess

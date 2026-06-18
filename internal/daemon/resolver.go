@@ -14,15 +14,15 @@ import (
 var ErrBadRequest = errors.New("bad request")
 
 // Resolver turns a (profile, manifest bytes) request into resolved name->value pairs,
-// authorizing each by tier and recording issued values in the session.
+// authorizing each via presence and recording issued values in the session.
 type Resolver struct {
-	reg  *backend.Registry
-	auth Authorizer
-	sess *Session
+	reg      *backend.Registry
+	presence Presence
+	sess     *Session
 }
 
-func NewResolver(reg *backend.Registry, auth Authorizer, sess *Session) *Resolver {
-	return &Resolver{reg: reg, auth: auth, sess: sess}
+func NewResolver(reg *backend.Registry, presence Presence, sess *Session) *Resolver {
+	return &Resolver{reg: reg, presence: presence, sess: sess}
 }
 
 // Resolve parses the manifest, selects the profile, authorizes + resolves each entry,
@@ -49,7 +49,10 @@ func (r *Resolver) Resolve(profile string, manifestBytes []byte) (map[string]str
 	}
 	out := make(map[string]string, len(p))
 	for name, e := range p {
-		if err := r.auth.Authorize(e.Tier, name); err != nil {
+		// Task 1 minimal seam swap: one presence check per entry. The real
+		// per-tier policy (normal needs unlocked session; dangerous prompts
+		// fresh and is never cached) lands in Task 3.
+		if err := r.presence.Prompt("resolve " + name); err != nil {
 			return nil, err // ErrLocked / denied — issue nothing
 		}
 		sec, err := r.reg.Resolve(e.Ref)

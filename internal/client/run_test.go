@@ -45,7 +45,7 @@ func newRunServer(t *testing.T) *Client {
 	}
 	reg := backend.NewRegistry()
 	reg.Register("mock", runMockBE{data: map[string]string{"S": "topsecret"}})
-	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubAuthorizer(), daemon.NewSession(15*time.Minute)))
+	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), daemon.NewSession(15*time.Minute)))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
 	return New(path)
