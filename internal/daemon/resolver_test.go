@@ -30,6 +30,7 @@ func TestResolveProfile(t *testing.T) {
 	reg := backend.NewRegistry()
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz"}})
 	sess := NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute) // Phase 5: open the session so resolved values are cached in its redactor (Task 3 wires this in the resolver).
 	rv := NewResolver(reg, NewStubPresence(), sess)
 
 	vals, err := rv.Resolve("smoke", []byte(manifestYAML))

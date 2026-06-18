@@ -45,7 +45,9 @@ func newRunServer(t *testing.T) *Client {
 	}
 	reg := backend.NewRegistry()
 	reg.Register("mock", runMockBE{data: map[string]string{"S": "topsecret"}})
-	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), daemon.NewSession(15*time.Minute)))
+	sess := daemon.NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute) // Phase 5: a fresh session is locked; open it (Task 3 wires unlock into the resolver/RPC path).
+	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), sess))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
 	return New(path)

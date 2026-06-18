@@ -7,6 +7,7 @@ import (
 
 func TestSessionIssueAndRedactor(t *testing.T) {
 	s := NewSession(15 * time.Minute)
+	s.Unlock(15 * time.Minute)
 	s.Issue("GITHUB_TOKEN", "ghp_secret")
 	s.Issue("STRIPE", "sk_live_x")
 
@@ -17,8 +18,99 @@ func TestSessionIssueAndRedactor(t *testing.T) {
 	}
 }
 
+// A fresh NewSession is LOCKED until Unlock is called (Phase 5 invariant: the
+// implicit "open" session of Phase 4 is replaced by an explicit unlock step).
+func TestSessionFreshIsLocked(t *testing.T) {
+	s := NewSession(15 * time.Minute)
+	if !s.Locked() {
+		t.Fatal("fresh session must be locked until Unlock")
+	}
+	locked, remaining := s.Status()
+	if !locked {
+		t.Fatal("Status on a fresh session must report locked")
+	}
+	if remaining != 0 {
+		t.Fatalf("locked session must report 0 remaining, got %v", remaining)
+	}
+}
+
+// Unlock opens the session for a TTL: Locked()==false and Status reports the
+// remaining time close to the TTL. Uses an injected clock for determinism.
+func TestSessionUnlock(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	s := NewSession(time.Minute)
+	s.now = func() time.Time { return cur }
+
+	s.Unlock(15 * time.Minute)
+	if s.Locked() {
+		t.Fatal("session must be unlocked after Unlock")
+	}
+	locked, remaining := s.Status()
+	if locked {
+		t.Fatal("Status must report unlocked after Unlock")
+	}
+	if remaining != 15*time.Minute {
+		t.Fatalf("remaining = %v, want 15m", remaining)
+	}
+}
+
+// Lock after Unlock re-locks the session, clears issued values, and the redactor
+// then masks nothing.
+func TestSessionLockReLocks(t *testing.T) {
+	s := NewSession(15 * time.Minute)
+	s.Unlock(15 * time.Minute)
+	s.Issue("TOKEN", "ghp_secret")
+	if s.Redactor().Redact("ghp_secret") == "ghp_secret" {
+		t.Fatal("unlocked session must mask issued value")
+	}
+
+	s.Lock()
+	if !s.Locked() {
+		t.Fatal("session must be locked after Lock")
+	}
+	if got := s.Redactor().Redact("ghp_secret"); got != "ghp_secret" {
+		t.Fatalf("locked session must mask nothing, got %q", got)
+	}
+	if got := s.Matcher(); got == nil {
+		t.Fatal("Matcher must be non-nil even when locked")
+	}
+	locked, remaining := s.Status()
+	if !locked || remaining != 0 {
+		t.Fatalf("Status after Lock = (%v, %v), want (true, 0)", locked, remaining)
+	}
+}
+
+// Once the unlock TTL elapses the session re-locks: Locked()==true, Status
+// reports 0 remaining, and the redactor masks nothing. No wall-clock sleep.
+func TestSessionUnlockExpiryReLocks(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	s := NewSession(time.Minute)
+	s.now = func() time.Time { return cur }
+
+	s.Unlock(10 * time.Minute)
+	s.Issue("TOKEN", "ghp_secret")
+	if s.Locked() {
+		t.Fatal("must be unlocked right after Unlock")
+	}
+
+	cur = base.Add(11 * time.Minute) // advance past the unlock deadline
+	if !s.Locked() {
+		t.Fatal("session must re-lock once the unlock TTL elapses")
+	}
+	locked, remaining := s.Status()
+	if !locked || remaining != 0 {
+		t.Fatalf("expired Status = (%v, %v), want (true, 0)", locked, remaining)
+	}
+	if got := s.Redactor().Redact("ghp_secret"); got != "ghp_secret" {
+		t.Fatalf("expired session must mask nothing, got %q", got)
+	}
+}
+
 func TestSessionExpiryClears(t *testing.T) {
 	s := NewSession(0) // already-expired TTL
+	s.Unlock(0)
 	s.Issue("X", "v")
 	if !s.Expired() {
 		t.Fatal("zero TTL should be expired immediately")
@@ -37,6 +129,7 @@ func TestSessionReissueAfterExpiryDropsOldValue(t *testing.T) {
 	cur := base
 	s := NewSession(10 * time.Minute)
 	s.now = func() time.Time { return cur }
+	s.Unlock(10 * time.Minute) // open the session against the fake clock
 
 	s.Issue("OLD", "oldval") // first Issue rebases the deadline onto the fake clock
 	if s.Expired() {
@@ -48,7 +141,8 @@ func TestSessionReissueAfterExpiryDropsOldValue(t *testing.T) {
 		t.Fatal("must be expired once the TTL elapses")
 	}
 
-	s.Issue("NEW", "newval") // expired path must clear OLD before recording NEW
+	s.Unlock(10 * time.Minute) // re-open against the advanced clock
+	s.Issue("NEW", "newval")   // expired path must clear OLD before recording NEW
 	r := s.Redactor()
 	if got := r.Redact("oldval"); got != "oldval" {
 		t.Fatalf("stale value from an expired window resurfaced: %q", got)

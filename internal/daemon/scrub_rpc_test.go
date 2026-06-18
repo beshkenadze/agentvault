@@ -20,6 +20,7 @@ func newScrubServer(t *testing.T, name, value string) (string, *Session) {
 		t.Fatal(err)
 	}
 	sess := NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute) // Phase 5: a fresh session is locked; open it so issued values are honored.
 	sess.Issue(name, value)
 	// Wire a resolver over the same session so the Server captures it for scrub.
 	srv.SetResolver(NewResolver(nil, NewStubPresence(), sess))

@@ -151,6 +151,13 @@ func TestE2ERunMasksRealSecret(t *testing.T) {
 // secret through the real avd's scrub stream masks it. The session must already
 // hold the value, so this reuses the SAME daemon by resolving first (Run), then
 // scrubbing over a fresh connection to the same socket.
+//
+// PHASE 5 / TASK 2 NOTE: as of the session unlock/lock change, a fresh avd session
+// is LOCKED, so scrub (which reads from the session) masks nothing until the session
+// is unlocked. This e2e spawns the REAL avd subprocess and cannot call sess.Unlock
+// directly; it needs the `av unlock` RPC (Task 4) or avd unlock-on-startup wiring
+// (Task 8). Until then this test is an EXPECTED failure — do NOT hack the resolver
+// to make it pass; Task 4/8 will add the unlock step before the priming Run.
 func TestE2EScrubMasksRealSecret(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: builds and spawns the real avd")
