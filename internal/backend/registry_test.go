@@ -44,6 +44,23 @@ func TestRegistryUnknownBackend(t *testing.T) {
 	}
 }
 
+// TestRegistryReRegisterOverwrites guards the live-setup re-wire path: registering a
+// second backend under an existing id REPLACES the first (map semantics), so `av setup`
+// can swap "file" for the freshly provisioned store without a daemon restart.
+func TestRegistryReRegisterOverwrites(t *testing.T) {
+	r := NewRegistry()
+	r.Register("file", &mockBackend{data: map[string]string{"K": "old"}})
+	r.Register("file", &mockBackend{data: map[string]string{"K": "new"}})
+
+	got, err := r.Resolve("av://file/K")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "new" {
+		t.Fatalf("value = %q, want new (re-register must overwrite)", got.Value)
+	}
+}
+
 func TestRegistryListNoValues(t *testing.T) {
 	r := NewRegistry()
 	r.Register("mock", &mockBackend{data: map[string]string{"A": "1", "B": "2"}})

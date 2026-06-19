@@ -181,6 +181,55 @@ func buildAndAutostartEnv(t *testing.T, auth string) (dir, sockPath, manifestPat
 	return dir, sockPath, manifestPath
 }
 
+// buildAndAutostartZeroConfig is buildAndAutostartEnv for the ZERO-CONFIG path: it
+// builds the REAL avd but, instead of pointing AV_AGE_VAULT/AV_AGE_IDENTITY at a
+// pre-made vault, it points HOME and XDG_CONFIG_HOME at the temp dir so the daemon
+// AUTO-DISCOVERS its store under <tmp>/agentvault and `av setup` writes there. No
+// AV_AGE_* env is set — proving the daemon needs none. AV_TEST_AUTH=allow lets unlock
+// succeed without Touch ID, and AV_TEST_ENCLAVE=stub makes setup's Wrap and the lazy
+// Unwrap identity-passthrough so the round trip runs with no Secure Enclave.
+//
+// It returns the socket path the autostarted daemon binds and the config dir the store
+// lands in (so the test can write a manifest there / assert files appear).
+func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "avz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	avd := filepath.Join(dir, "avd")
+	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build avd: %v\n%s", err, out)
+	}
+
+	// HOME + XDG_CONFIG_HOME steer config.DefaultConfigDir() into the temp dir; the
+	// spawned avd inherits this env (autostart uses exec.Command with no custom Env).
+	t.Setenv("AV_AVD_PATH", avd)
+	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("AV_TEST_AUTH", "allow")   // unlock without a biometric prompt
+	t.Setenv("AV_TEST_ENCLAVE", "stub") // identity-passthrough wrap/unwrap, no Enclave
+	// Belt-and-braces: ensure no AV_AGE_* leaks in from the outer env so we truly
+	// exercise auto-discovery, not an env-configured backend.
+	os.Unsetenv("AV_AGE_VAULT")
+	os.Unsetenv("AV_AGE_IDENTITY")
+	os.Unsetenv("AV_AGE_IDENTITY_ENCLAVE")
+
+	cfgDir = filepath.Join(dir, "xdg", "agentvault")
+	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	t.Cleanup(func() {
+		_ = exec.Command("pkill", "-f", avd).Run()
+		_ = os.Remove(sockPath)
+		_ = os.Remove(sockPath + ".lock")
+	})
+	return sockPath, cfgDir
+}
+
 // assertNoSecret fails if the real secret appears anywhere in the given buffers.
 func assertNoSecret(t *testing.T, where string, bufs ...*bytes.Buffer) {
 	t.Helper()
@@ -376,5 +425,108 @@ func TestE2EDangerousNotCachedInScrub(t *testing.T) {
 	}
 	if strings.Contains(got, "{{AV:AWS_KEY}}") {
 		t.Fatalf("dangerous value was masked by scrub — it must never be cached: %q", got)
+	}
+}
+
+// TestE2EZeroConfigSetupThenRun is the Task-6 integration guard: it proves the
+// zero-config flow end-to-end through the REAL avd with NO AV_AGE_* env at all.
+//
+//  1. BEFORE setup: the daemon auto-discovers <cfg>/agentvault and finds no store, so
+//     the file backend is NOT registered — `av add` to av://file/... must FAIL.
+//  2. The `setup` RPC provisions the store (stub Wrap, so no Enclave) and LIVE-wires
+//     the file backend + the session unwrapper — no daemon restart.
+//  3. AFTER setup: `av add NPM=secret` writes the vault, `av unlock` opens the session
+//     (which lazily unwraps the identity via the stub — proving the WithUnwrapper path),
+//     and `av run` masks the value as {{AV:NPM_TOKEN}} with the real secret nowhere.
+//
+// AV_TEST_ENCLAVE=stub makes both Wrap (setup) and Unwrap (unlock) identity-passthrough,
+// so the Enclave-wrapped DEFAULT path (identity.enc) is exercised with no hardware.
+func TestE2EZeroConfigSetupThenRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: builds and spawns the real avd")
+	}
+	sockPath, cfgDir := buildAndAutostartZeroConfig(t)
+	cl := New(sockPath)
+
+	const npmSecret = "npm_REAL_e2e_zeroconfig"
+
+	// 1. Before setup: no store on disk, so no writable file backend. `av add` must fail.
+	if err := cl.Add("file", "NPM_TOKEN", []byte(npmSecret)); err == nil {
+		t.Fatalf("add before setup must fail (no file backend registered)")
+	} else {
+		var rpc *ipc.RPCError
+		if !errors.As(err, &rpc) {
+			t.Fatalf("want *ipc.RPCError before setup, got %T: %v", err, err)
+		}
+		// The daemon's writer() rejects an unregistered/read-only "file" backend with
+		// CodeBadRequest; we only require a clean RPC error (not a transport failure).
+		if rpc.Code != ipc.CodeBadRequest {
+			t.Fatalf("add before setup: want CodeBadRequest, got code=%d msg=%q", rpc.Code, rpc.Message)
+		}
+		if strings.Contains(rpc.Message, npmSecret) {
+			t.Fatalf("pre-setup error leaked secret: %q", rpc.Message)
+		}
+	}
+
+	// 2. Provision the store (default Enclave-wrapped path under the stub Wrap).
+	res, err := cl.Setup(ipc.SetupParams{})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if !res.Created {
+		t.Fatalf("setup: want Created=true on first setup, got %+v", res)
+	}
+	wantVault := filepath.Join(cfgDir, "vault.age")
+	wantID := filepath.Join(cfgDir, "identity.enc")
+	if res.VaultPath != wantVault || res.IdentityPath != wantID {
+		t.Fatalf("setup paths = (%q,%q), want (%q,%q)", res.VaultPath, res.IdentityPath, wantVault, wantID)
+	}
+	for _, p := range []string{wantVault, wantID} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Fatalf("setup did not create %s: %v", p, statErr)
+		}
+	}
+
+	// 3. AFTER setup the file backend is live-wired against the SESSION as its
+	// IdentitySource (the Enclave/default path). The vault key only exists in an UNLOCKED
+	// session, so unlock first — this drives the session unwrapper (stub identity
+	// passthrough here), proving the WithUnwrapper path works end-to-end without a Touch
+	// ID. Then `av add` can derive the recipient and write the vault (no daemon restart).
+	if err := cl.Unlock(); err != nil {
+		t.Fatalf("unlock after setup: %v", err)
+	}
+	if err := cl.Add("file", "NPM_TOKEN", []byte(npmSecret)); err != nil {
+		t.Fatalf("add after setup: %v", err)
+	}
+
+	// Write a manifest that references the just-added secret and run a child that echoes
+	// it; av must mask the value at the source.
+	manifestPath := filepath.Join(cfgDir, "agentvault.yaml")
+	manifest := "profiles:\n" +
+		"  zero:\n" +
+		"    NPM_TOKEN:\n" +
+		"      ref: av://file/NPM_TOKEN\n" +
+		"      tier: normal\n"
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code, err := Run(cl, RunOptions{
+		Profile:      "zero",
+		ManifestPath: manifestPath,
+		Command:      []string{"sh", "-c", "echo got=$NPM_TOKEN"},
+	}, &out, &errBuf)
+	if err != nil {
+		t.Fatalf("run: %v (stderr=%q)", err, errBuf.String())
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := strings.TrimSpace(out.String()); got != "got={{AV:NPM_TOKEN}}" {
+		t.Fatalf("stdout = %q, want got={{AV:NPM_TOKEN}}", got)
+	}
+	if strings.Contains(out.String(), npmSecret) || strings.Contains(errBuf.String(), npmSecret) {
+		t.Fatalf("zero-config secret leaked: out=%q err=%q", out.String(), errBuf.String())
 	}
 }

@@ -17,9 +17,12 @@ import (
 	"github.com/beshkenadze/agentvault/internal/backend/agefile"
 	"github.com/beshkenadze/agentvault/internal/backend/keychain"
 	"github.com/beshkenadze/agentvault/internal/backend/onepassword"
+	"github.com/beshkenadze/agentvault/internal/config"
 	"github.com/beshkenadze/agentvault/internal/daemon"
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
 	"github.com/beshkenadze/agentvault/internal/enclave"
+	"github.com/beshkenadze/agentvault/internal/ipc"
+	"github.com/beshkenadze/agentvault/internal/provision"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
@@ -33,16 +36,24 @@ func main() {
 		log.Fatalf("avd: listen: %v", err)
 	}
 
-	// Wire the resolver so `resolve` can broker secrets and `scrub` can mask them
-	// against the same session. cmd/avd only assembles plumbing — it never reads a
-	// secret value itself; the agefile backend decrypts inside avd on demand.
-	reg := backend.NewRegistry()
-	registerBackends(reg)
 	// daemon.DefaultTTL is the single source of truth for the session window: the
 	// same const the unlock RPC uses (server.go), so the session TTL and the unlock
 	// duration can never drift. Issued values clear after this window; auto-lock on
 	// screen-lock/sleep (StartAutoLock below, landed in Phase 5) re-locks earlier.
+	//
+	// The session is created BEFORE registerBackends because the Enclave-identity path
+	// wires its lazy unwrapper INTO this session (the session is the agefile backend's
+	// IdentitySource): the key is unwrapped on unlock and zeroized on lock, never held
+	// by the backend. The wrap/unwrap pair comes from one seam (enclaveFuncs) so the
+	// startup path and the live `setup` provisioner share identical crypto (DRY).
 	sess := daemon.NewSession(daemon.DefaultTTL)
+	wrap, unwrap := enclaveFuncs()
+
+	// Wire the resolver so `resolve` can broker secrets and `scrub` can mask them
+	// against the same session. cmd/avd only assembles plumbing — it never reads a
+	// secret value itself; the agefile backend decrypts inside avd on demand.
+	reg := backend.NewRegistry()
+	registerBackends(reg, sess, unwrap)
 
 	// Layer-2 net: wire the gitleaks detector into the session so scrub catches
 	// DERIVED secrets the daemon never issued and dangerous-tier values that are never
@@ -72,6 +83,12 @@ func main() {
 	srv.SetResolver(daemon.NewResolver(reg, presence, sess, daemon.WithAudit(auditLog)))
 	srv.SetPresence(presence)
 	srv.SetAudit(auditLog)
+
+	// The `setup` RPC provisions the local age store and LIVE-wires the file backend so a
+	// following `av add`/`av run` works with NO daemon restart. It reuses the SAME
+	// wrap/unwrap seam and default paths as registerBackends (DRY) — avd owns the
+	// age+enclave linkage while the daemon dispatch stays crypto-free.
+	srv.SetProvisioner(makeProvisioner(reg, sess, wrap, unwrap))
 
 	// Auto-lock observers (screen-lock/sleep on darwin; no-op elsewhere) re-lock the
 	// SAME session. stop() removes them on shutdown.
@@ -125,52 +142,61 @@ func openAuditLog(socketPath string) audit.Logger {
 }
 
 // registerBackends registers the secret backends. The age-file backend ("file") is
-// wired only when AV_AGE_VAULT is set AND an age identity can be obtained; if not it
-// is skipped (the daemon still runs, and a resolve of av://file/... returns a "no
-// backend registered" error). The 1Password backend ("1p") is registered
-// UNCONDITIONALLY: it is lazy — it never touches the `op` binary at registration time,
-// only on Resolve — so wiring it costs nothing until a av://1p/... ref is resolved
-// (which then requires `op` installed + signed in; see internal/backend/onepassword).
-// It logs which ids were registered to the daemon's own stderr — NEVER a secret value.
+// wired from EITHER explicit env (AV_AGE_VAULT + an identity) OR — when none of those
+// env vars are set — AUTO-DISCOVERED at the config defaults (config.DefaultVaultPath +
+// identity.enc/identity.txt), so a `brew install → av setup` store needs zero env. If
+// neither a configured nor a discovered store exists, the file backend is simply skipped
+// (the daemon still runs; `av setup` can provision it live). The 1Password ("1p") and
+// keychain backends are registered UNCONDITIONALLY: both are lazy — they never touch
+// their CLI at registration time, only on Resolve — so wiring them costs nothing until a
+// matching ref is resolved. It logs which ids were registered to the daemon's own stderr
+// — NEVER a secret value.
 //
-// IDENTITY PRECEDENCE (the seam Phase 6 fills with the Secure Enclave):
-//  1. AV_AGE_IDENTITY_ENCLAVE (HARDENED, preferred): a path to a wrapped-identity
-//     BLOB produced by enclave.Wrap. The age key is unwrapped on demand via
-//     enclave.Unwrap, which triggers a LIVE Touch ID (user-presence ACL) — so even
-//     a daemon compromise can't decrypt the vault without the user present. This
-//     REPLACES the plaintext-on-disk identity. (Requires a darwin+cgo build on
-//     Secure Enclave hardware; on any other build enclave.Unwrap returns the
-//     "unavailable" error and the file backend is skipped — it does NOT silently
-//     fall back to plaintext, because the operator explicitly asked for the
-//     hardened path.)
-//  2. AV_AGE_IDENTITY (FALLBACK, Phase 5/4 default): a path to a plaintext age
-//     identity file. Used only when AV_AGE_IDENTITY_ENCLAVE is unset. This keeps
-//     the daemon runnable on non-Enclave setups (and in CI/e2e).
+// IDENTITY PRECEDENCE (env wins over auto-discovery; within each, Enclave wins over
+// plaintext — the hardened path NEVER silently degrades to plaintext):
+//  1. AV_AGE_IDENTITY_ENCLAVE (HARDENED, preferred): a path to a wrapped-identity BLOB
+//     produced by enclave.Wrap. LAZY + session-coupled: we do NOT unwrap at startup
+//     (that would fire a Touch ID at daemon launch / login). Instead we set the SESSION
+//     unwrapper (the unwrap runs on `av unlock`, where the Touch ID IS the presence
+//     proof) and register agefile.New(sess, ...) so the session is the IdentitySource —
+//     the key lives in the session (zeroized on lock), never held by the backend.
+//  2. AV_AGE_IDENTITY (FALLBACK): a path to a plaintext age identity file. EAGER load
+//     into a Static source (no session unwrapper) — keeps the daemon runnable on
+//     non-Enclave setups and in CI/e2e.
+//  3. AUTO-DISCOVERY (only when ALL AV_AGE_* are unset): the default store under
+//     config.DefaultConfigDir(). identity.enc (Enclave, lazy/session-coupled) is
+//     preferred over identity.txt (plaintext, eager); the vault must also exist.
 //
-// SECURITY: the age identity is loaded here only to construct the backend; the
-// plaintext vault is decrypted lazily inside the backend on each Resolve. The
-// unwrapped identity bytes never appear in a log or error; identity-loading errors
+// SECURITY: the Enclave path loads NO key material at startup; the plaintext path loads
+// the identity only to construct the backend, and the vault is decrypted lazily inside
+// the backend on each Resolve. Identity bytes never appear in a log or error; errors
 // carry only a path/reason or an OSStatus, never key material.
-func registerBackends(reg *backend.Registry) {
+func registerBackends(reg *backend.Registry, sess *daemon.Session, unwrap func([]byte) ([]byte, error)) {
 	registered := []string{}
 
 	vaultPath := os.Getenv("AV_AGE_VAULT")
 	enclavePath := os.Getenv("AV_AGE_IDENTITY_ENCLAVE")
 	idPath := os.Getenv("AV_AGE_IDENTITY")
+
+	// When NONE of the AV_AGE_* env vars are set, fall back to the auto-discovered
+	// default store: a vault + an identity (Enclave-wrapped preferred) already on disk.
+	if vaultPath == "" && enclavePath == "" && idPath == "" {
+		vaultPath, enclavePath, idPath = discoverDefaultStore()
+	}
+
 	switch {
 	case vaultPath == "" || (enclavePath == "" && idPath == ""):
-		log.Printf("avd: no file backend (set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext] to enable)")
+		log.Printf("avd: no file backend (run `av setup`, or set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext])")
+	case enclavePath != "":
+		// HARDENED path: lazy, session-coupled — no startup unwrap, no login Touch ID.
+		wireEnclaveBackend(reg, sess, unwrap, enclavePath, vaultPath)
+		registered = append(registered, "file")
 	default:
-		id, err := loadFileBackendIdentity(enclavePath, idPath)
-		if err != nil {
-			// The error carries only a path/reason or an OSStatus, never key material.
+		// FALLBACK path: eager plaintext load into a Static source.
+		if err := wirePlaintextBackend(reg, idPath, vaultPath); err != nil {
+			// The error carries only a path/reason, never key material.
 			log.Printf("avd: file backend disabled: %v", err)
 		} else {
-			// Wrap the (plaintext or Enclave-unwrapped) identity in a Static source for
-			// now — the backend fetches it per operation via the IdentitySource seam.
-			// Task 6 replaces the Enclave path's Static with the daemon session, so the
-			// key lives in the session (zeroized on lock) rather than held here.
-			reg.Register("file", agefile.New(agefile.Static{ID: id}, vaultPath))
 			registered = append(registered, "file")
 		}
 	}
@@ -190,45 +216,145 @@ func registerBackends(reg *backend.Registry) {
 	log.Printf("avd: registered backends: %s", strings.Join(registered, " "))
 }
 
-// loadFileBackendIdentity resolves the age identity for the file backend following
-// the precedence documented on registerBackends: the Secure-Enclave-wrapped blob
-// (hardened) wins when AV_AGE_IDENTITY_ENCLAVE is set; otherwise the plaintext
-// AV_AGE_IDENTITY file (fallback). Exactly one source is consulted — the hardened
-// path never silently degrades to plaintext.
-func loadFileBackendIdentity(enclavePath, idPath string) (age.Identity, error) {
-	if enclavePath != "" {
-		log.Printf("avd: file backend identity: Secure Enclave (hardened; Touch ID on first resolve)")
-		return loadEnclaveIdentity(enclavePath)
+// discoverDefaultStore probes the config-default store directory for an existing vault
+// + identity and returns the paths to wire, mirroring the env precedence (Enclave wins
+// over plaintext). It returns empty strings for anything missing, so the caller's
+// "vault == \"\" || no identity" guard skips the file backend when no store exists yet
+// (the common pre-`av setup` state). It NEVER creates anything — `av setup` provisions;
+// this only discovers.
+func discoverDefaultStore() (vaultPath, enclavePath, idPath string) {
+	vault := config.DefaultVaultPath()
+	if !fileExists(vault) {
+		return "", "", "" // no vault → nothing to wire (e.g. before `av setup`)
 	}
-	log.Printf("avd: file backend identity: plaintext file (fallback; set AV_AGE_IDENTITY_ENCLAVE to harden)")
-	return loadAgeIdentity(idPath)
+	if enc := config.DefaultEnclaveIdentityPath(); fileExists(enc) {
+		log.Printf("avd: auto-discovered default store (Enclave identity)")
+		return vault, enc, ""
+	}
+	if plain := config.DefaultPlaintextIdentityPath(); fileExists(plain) {
+		log.Printf("avd: auto-discovered default store (plaintext identity)")
+		return vault, "", plain
+	}
+	return "", "", "" // vault present but no identity → can't wire a reader
 }
 
-// loadEnclaveIdentity reads a wrapped-identity blob from disk, unwraps it with the
-// Secure Enclave (enclave.Unwrap triggers Touch ID via the key's user-presence ACL),
-// and parses the recovered bytes as an age identity. On a non-Enclave build, or if
-// the Enclave is unreachable / the user denies, enclave.Unwrap returns a value-free
-// error and the file backend is skipped.
+// fileExists reports whether path is an existing file (any stat success). A transient
+// stat error is treated as "absent" so discovery fails safe (skip the backend) rather
+// than wiring a path we can't read.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// wireEnclaveBackend wires the HARDENED file backend WITHOUT unwrapping at startup. It
+// installs a session unwrapper that, on `av unlock`, reads the wrapped blob and unwraps
+// it (a Touch ID in production, identity-passthrough under AV_TEST_ENCLAVE=stub), then
+// registers agefile.New(sess, vaultPath) so the SESSION is the IdentitySource: the key
+// is held in the session (zeroized on lock), never by the backend.
 //
-// SECURITY: the unwrapped bytes are only handed to age.ParseIdentities; they are
-// never logged. Errors carry a path or an OSStatus, never key material.
-func loadEnclaveIdentity(path string) (age.Identity, error) {
-	blob, err := os.ReadFile(path)
+// The unwrapper maps an enclave user-cancel / Touch-ID denial to daemon.ErrDenied via
+// mapEnclaveErr so the unlock handler reports CodeDenied; any other failure stays as-is
+// (→ CodeLocked). SECURITY: the blob and unwrapped bytes never reach a log or error.
+func wireEnclaveBackend(reg *backend.Registry, sess *daemon.Session, unwrap func([]byte) ([]byte, error), encPath, vaultPath string) {
+	log.Printf("avd: file backend identity: Secure Enclave (hardened; Touch ID on unlock, lazy)")
+	sess.WithUnwrapper(func() ([]byte, error) {
+		blob, err := os.ReadFile(encPath)
+		if err != nil {
+			return nil, err
+		}
+		b, err := unwrap(blob)
+		if err != nil {
+			return nil, mapEnclaveErr(err)
+		}
+		return b, nil
+	})
+	reg.Register("file", agefile.New(sess, vaultPath))
+}
+
+// wirePlaintextBackend wires the FALLBACK file backend by EAGERLY loading the plaintext
+// identity into a Static source (no session unwrapper). It surfaces a load error so the
+// caller can log it and skip the backend rather than wiring an unreadable vault.
+func wirePlaintextBackend(reg *backend.Registry, idPath, vaultPath string) error {
+	log.Printf("avd: file backend identity: plaintext file (fallback; run `av setup` without --plaintext to harden)")
+	id, err := loadAgeIdentity(idPath)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	plaintext, err := enclave.Unwrap(blob)
-	if err != nil {
-		return nil, err
+	reg.Register("file", agefile.New(agefile.Static{ID: id}, vaultPath))
+	return nil
+}
+
+// mapEnclaveErr classifies an enclave Unwrap failure for the unlock handler. A user
+// cancel / Touch-ID denial (enclave.IsUserCanceled, matched on the structured OSStatus —
+// never a string) becomes daemon.ErrDenied → CodeDenied, so a cancelled unlock reads as
+// "denied". Any other failure (Enclave unreachable, tampered blob, read error) is
+// returned UNCHANGED → CodeLocked. nil passes through. On non-darwin/non-cgo builds
+// enclave.IsUserCanceled is always false, so this is a no-op there.
+func mapEnclaveErr(err error) error {
+	if err == nil {
+		return nil
 	}
-	ids, err := age.ParseIdentities(strings.NewReader(string(plaintext)))
-	if err != nil {
-		return nil, err
+	if enclave.IsUserCanceled(err) {
+		return daemon.ErrDenied
 	}
-	if len(ids) == 0 {
-		return nil, errNoIdentity
+	return err
+}
+
+// makeProvisioner returns the closure that serves the `setup` RPC: it provisions the
+// local age store (provision.Provision with the injected Wrap) and, on success, LIVE-
+// wires the file backend so a following `av add`/`av run` works with NO daemon restart.
+// It reuses the SAME wrap/unwrap seam and config default paths as registerBackends (DRY)
+// — no duplicated path logic.
+//
+// Live re-wiring: for the wrapped (default) store it sets the session unwrapper for the
+// new identity.enc and registers agefile.New(sess, vault); for a --plaintext store it
+// eagerly loads identity.txt into a Static source. Registry.Register overwrites by id, so
+// re-running setup (e.g. --rotate) cleanly replaces the "file" backend.
+//
+// SECURITY: only ipc.SetupParams/SetupResult cross this seam (booleans + on-disk paths);
+// no secret material is logged, returned, or embedded in an error.
+func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap func([]byte) ([]byte, error)) func(ipc.SetupParams) (ipc.SetupResult, error) {
+	return func(p ipc.SetupParams) (ipc.SetupResult, error) {
+		r, err := provision.Provision(provision.Options{
+			Rotate:    p.Rotate,
+			Plaintext: p.Plaintext,
+			Wrap:      wrap, // Dir defaults to config.DefaultConfigDir() inside Provision
+		})
+		if err != nil {
+			return ipc.SetupResult{}, err
+		}
+		// (Re)wire the file backend LIVE against the freshly provisioned store. This runs
+		// whether the store was newly created or already present (idempotent setup), so a
+		// daemon that started before `av setup` picks up the new backend without a restart.
+		if p.Plaintext {
+			if werr := wirePlaintextBackend(reg, r.IdentityPath, r.VaultPath); werr != nil {
+				return ipc.SetupResult{}, werr
+			}
+		} else {
+			wireEnclaveBackend(reg, sess, unwrap, r.IdentityPath, r.VaultPath)
+		}
+		return ipc.SetupResult{VaultPath: r.VaultPath, IdentityPath: r.IdentityPath, Created: r.Created}, nil
 	}
-	return ids[0], nil
+}
+
+// enclaveFuncs returns the wrap/unwrap pair the daemon seals/unseals the vault identity
+// with. It is the SSOT used by BOTH startup wiring (registerBackends) and the live
+// `setup` provisioner (makeProvisioner), so the two never diverge.
+//
+// TEST SEAM (mirrors AV_TEST_AUTH=allow): when AV_TEST_ENCLAVE=stub it returns
+// identity-PASSTHROUGH funcs — Wrap returns its input unchanged and Unwrap returns its
+// input unchanged — and logs a LOUD warning, EXACTLY like selectPresence logs the stub
+// presence. This lets CI/e2e exercise setup→unlock→run with no Secure Enclave. It is
+// test-only and env-gated, the same risk profile as AV_TEST_AUTH=allow: the identity is
+// NOT hardware-protected under the stub. Otherwise it returns the real enclave.Wrap and
+// a closure over enclave.Unwrap (so makeProvisioner can take a func value either way).
+func enclaveFuncs() (wrap, unwrap func([]byte) ([]byte, error)) {
+	if os.Getenv("AV_TEST_ENCLAVE") == "stub" {
+		log.Printf("avd: using stub enclave (AV_TEST_ENCLAVE=stub) — identity NOT hardware-protected")
+		identity := func(b []byte) ([]byte, error) { return b, nil }
+		return identity, identity
+	}
+	return enclave.Wrap, func(b []byte) ([]byte, error) { return enclave.Unwrap(b) }
 }
 
 // loadAgeIdentity reads an age identity file and returns its first identity.

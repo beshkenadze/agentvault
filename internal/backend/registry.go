@@ -22,7 +22,11 @@ func NewRegistry() *Registry {
 	return &Registry{backends: map[string]Backend{}}
 }
 
-// Register adds a backend under an id (e.g. "file", "1p", "keychain").
+// Register adds a backend under an id (e.g. "file", "1p", "keychain"). It OVERWRITES
+// any existing backend under that id (it is a map assignment, not append-only): the
+// live `setup` provisioner relies on this to re-wire "file" against a freshly
+// provisioned store without a daemon restart. The concurrency note above still holds —
+// re-registration must happen before/outside concurrent Resolve/List.
 func (r *Registry) Register(id string, b Backend) {
 	r.backends[id] = b
 }

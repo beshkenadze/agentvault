@@ -1,6 +1,7 @@
 package enclave
 
 import (
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -83,4 +84,23 @@ func TestEnclaveLinkedAndCallable(t *testing.T) {
 		t.Skipf("enclave unreachable in this environment (expected in CI): %v", err)
 	}
 	t.Log("EnsureKey succeeded: a Secure Enclave key exists (likely real hardware)")
+}
+
+// TestIsUserCanceledFalseForNonCancel asserts the build-agnostic NEGATIVE cases: a nil
+// error, a plain error, and the "unavailable" error every stub returns must all report
+// false, so cmd/avd maps them to CodeLocked (not CodeDenied). The POSITIVE case
+// (errSecUserCanceled / errSecAuthFailed) references the darwin-only *StatusError and is
+// covered in enclave_cancel_darwin_test.go.
+func TestIsUserCanceledFalseForNonCancel(t *testing.T) {
+	if IsUserCanceled(nil) {
+		t.Fatal("IsUserCanceled(nil) must be false")
+	}
+	if IsUserCanceled(errors.New("some other failure")) {
+		t.Fatal("IsUserCanceled(plain error) must be false")
+	}
+	// errUnavailable is what every non-cgo stub returns and what the real path returns
+	// when the Enclave is unreachable — neither is a user cancel.
+	if IsUserCanceled(errUnavailable) {
+		t.Fatal("IsUserCanceled(errUnavailable) must be false")
+	}
 }

@@ -161,8 +161,46 @@ func copyAndFree(out *C.av_enclave_blob) []byte {
 	return b
 }
 
-// statusError builds a value-free error from an OSStatus-derived code. It embeds
-// the operation name and the numeric code ONLY — never plaintext or key material.
+// StatusError is the value-free error every failing native call returns. It embeds
+// the operation name and the OSStatus-derived numeric code ONLY — never plaintext or
+// key material (the Error() text is unchanged from the old fmt.Errorf wording so the
+// SECURITY regression test and any log readers stay stable). The Code is exported so
+// callers classify a failure WITHOUT string-matching: IsUserCanceled inspects it.
+type StatusError struct {
+	Op   string
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: secure enclave error (OSStatus %d)", e.Op, e.Code)
+}
+
+// statusError builds a value-free *StatusError from an OSStatus-derived code.
 func statusError(op string, code int) error {
-	return fmt.Errorf("%s: secure enclave error (OSStatus %d)", op, code)
+	return &StatusError{Op: op, Code: code}
+}
+
+// OSStatus codes we classify as a deliberate user refusal of the Touch ID / passcode
+// prompt (as opposed to a hardware/entitlement failure). Values from <Security/SecBase.h>:
+//
+//	errSecUserCanceled (-128): the user pressed Cancel on the LocalAuthentication sheet.
+//	errSecAuthFailed (-25293): authentication failed (e.g. too many failed Touch ID tries
+//	then a cancelled passcode) — a denied presence proof, not an unavailable Enclave.
+const (
+	errSecUserCanceled = -128
+	errSecAuthFailed   = -25293
+)
+
+// IsUserCanceled reports whether err is an enclave Unwrap failure caused by the user
+// DENYING the Touch ID / passcode prompt (cancel / auth-failed), as opposed to an
+// Enclave that is simply unreachable. cmd/avd maps a true result to daemon.ErrDenied
+// (→ CodeDenied) so a cancelled unlock reads as "denied", while any other failure stays
+// CodeLocked. It matches on the structured OSStatus code via errors.As — NEVER on the
+// error string — so the classification can't drift if the wording changes.
+func IsUserCanceled(err error) bool {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code == errSecUserCanceled || se.Code == errSecAuthFailed
+	}
+	return false
 }

@@ -22,3 +22,9 @@ func Wrap(_ []byte) ([]byte, error) { return nil, errUnavailable }
 
 // Unwrap is unavailable on this build. It never returns plaintext.
 func Unwrap(_ []byte) ([]byte, error) { return nil, errUnavailable }
+
+// IsUserCanceled mirrors the darwin predicate so cmd/avd compiles and cross-compiles
+// everywhere. On this build Unwrap only ever returns errUnavailable (never a Touch ID
+// cancel), so there is no user-cancel to detect — it always reports false, leaving such
+// a failure mapped to CodeLocked.
+func IsUserCanceled(_ error) bool { return false }
