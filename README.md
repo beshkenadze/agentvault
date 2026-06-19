@@ -173,10 +173,15 @@ build. `--plaintext` writes the identity unwrapped to `identity.txt` (an explici
 hatch — never chosen automatically); `--rotate` provisions a fresh identity and vault.
 
 `av version` prints `av`'s version and, when the daemon is reachable, `avd`'s version,
-the active key tier, and the socket path. If `av` and `avd` disagree it prints a loud
-warning — this catches a stale daemon still running after an upgrade (`brew services
-restart agentvault` to fix). It never hard-fails: with no daemon running it prints the
-`av` version and notes `avd (not running)`.
+the active key tier, and the socket path. It never hard-fails: with no daemon running it
+prints the `av` version and notes `avd (not running)`.
+
+**Self-healing after an upgrade.** After `brew upgrade`, the already-running `avd` keeps
+serving the old code until it is restarted. `av` handles this automatically: on the next
+command, if it sees a version skew (both release builds), it shuts the stale daemon down,
+lets the new binary take over, and retries — no manual `brew services restart` needed.
+Agents (`AV_NO_PROMPT=1`) never restart the daemon; they get a clear "avd outdated — ask
+a human" error and pause instead.
 
 ## Security model
 
