@@ -9,6 +9,21 @@ AgentVault keeps real secret values out of your context. You work with **logical
 names** only; the daemon (`avd`) holds the values and injects them into subprocesses
 on your behalf. Follow these rules.
 
+## Quick reference (exact syntax — don't guess)
+
+- **Find the PROFILE and logical NAMEs in `agentvault.yaml`** (read it). Never invent a
+  profile/name; `av run` has no safe default profile — always pass `--profile`.
+- **Run a command that needs secrets:**
+  `av run --profile <PROFILE> -- <command> [args...]`
+- **A tool that reads a CONFIG FILE** (`.npmrc`, `.env`, etc.): do NOT write the value to
+  disk. Put an environment *reference* in the file and run the tool under `av run`, so the
+  value is resolved at runtime and never persisted. Example:
+  `printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n' > .npmrc`
+  then `av run --profile <PROFILE> -- npm whoami`.
+- `av read [--profile <PROFILE>] <NAME>` — **human-only** (refuses a pipe/file). Don't use
+  it to fetch a value; use `av run`. If a human needs the value, they run it themselves.
+- `av status` (lock state) · `av version` (av/avd) · `av unlock` is a human action.
+
 ## 1. Run commands with `av run` — never read the secret yourself
 
 To run a command that needs credentials, wrap it:

@@ -11,6 +11,19 @@ pieces into whatever hook system your agent provides.
    redaction). Run it on every context-ingress channel.
 2. **This doc** — the contract the agent must follow.
 
+## Quick reference (exact syntax — don't guess)
+
+- **Find the PROFILE and logical NAMEs in `agentvault.yaml`** (read it). Never invent a
+  profile/name; always pass `--profile` (there is no safe default).
+- **Run a command that needs secrets:** `av run --profile <PROFILE> -- <command> [args...]`
+- **A tool that reads a CONFIG FILE** (`.npmrc`, `.env`, …): do NOT write the value to disk.
+  Put an environment *reference* in the file and run the tool under `av run` so the value is
+  resolved at runtime, never persisted. E.g.
+  `printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n' > .npmrc` then
+  `av run --profile <PROFILE> -- npm whoami`.
+- `av read [--profile <PROFILE>] <NAME>` — human-only (refuses a pipe/file); don't use it to
+  fetch a value, use `av run`. If a human needs the value, they run it themselves at a TTY.
+
 ## Rules for the agent
 
 - **Run commands with `av run`.** Use `av run --profile <PROFILE> -- <command>` to

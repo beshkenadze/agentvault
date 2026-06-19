@@ -91,6 +91,15 @@ func TestClaudeCodeSkillDoc(t *testing.T) {
 			t.Errorf("skill doc must mention %q", want)
 		}
 	}
+	// Exact-syntax quick reference (subagent tests showed agents otherwise guess the
+	// surface wrong — no --profile, invented profile names): the doc must teach the
+	// precise invocation, that names live in agentvault.yaml, and the config-file
+	// ${VAR}+av-run pattern (so a secret a tool reads from a file is never written to disk).
+	for _, want := range []string{"av run --profile", "agentvault.yaml", "${NPM_TOKEN}"} {
+		if !strings.Contains(skill.Content, want) {
+			t.Errorf("skill doc must teach exact usage %q", want)
+		}
+	}
 	// The scrub-coverage contract: the doc enumerates the context-ingress channels
 	// that MUST be hooked (so a human wiring it knows the requirement).
 	for _, channel := range []string{"Bash", "file read", "MCP"} {
