@@ -35,11 +35,19 @@ import (
 // identity that the file backend decrypts/encrypts the vault with. The unwrapper is the
 // Secure-Enclave Unwrap (a Touch ID), so a single unlock prompt covers BOTH opening the
 // session AND unwrapping the key — unwrap IS the presence proof. The identity lives as
-// RAW BYTES in a lockedValue (mlock + zeroize), parsed to an age.Identity ON DEMAND, so
-// the vault key gets the SAME at-rest protection as issued values. It is overwritten
-// (not merely dropped) on every lock path via destroyIssuedLocked, so a daemon
-// compromise AFTER lock cannot decrypt the vault: the key only exists in memory inside
-// the unlocked window.
+// RAW BYTES in a lockedValue (mlock + zeroize) and is parsed to an age.Identity ON
+// DEMAND. It is overwritten (not merely dropped) on every lock path via
+// destroyIssuedLocked, so a daemon compromise AFTER lock cannot decrypt the vault: the
+// key only exists in memory inside the unlocked window.
+//
+// DOCUMENTED LIMITATION (scope honesty, mirrors the issued-value matcher-forms note
+// above): only the AT-REST raw bytes get mlock+zeroize. Identity() parses those bytes and
+// RETURNS a live *age.X25519Identity to the agefile backend per operation — that parsed
+// handle is normal GC-managed heap (swappable, NOT mlock'd, NOT zeroized). It is transient
+// working memory for one decrypt/encrypt, never stored back; unlike issued values whose
+// cleartext only appears transiently inside Redactor/Matcher and is never handed out, the
+// parsed identity IS handed out, so the at-rest guarantee covers the stored bytes, not the
+// per-call parsed key.
 type Session struct {
 	ttl time.Duration
 	now func() time.Time
@@ -111,6 +119,14 @@ func (s *Session) destroyIssuedLocked() {
 func (s *Session) Unlock(ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.unlockLocked(ttl)
+}
+
+// unlockLocked is the body of Unlock for callers that already hold s.mu: it clears
+// (zeroizing) any stale values, marks the session unlocked, and sets the deadline. It
+// lets unlockWithUnwrapper fold open-and-store into ONE critical section. Caller must
+// hold s.mu.
+func (s *Session) unlockLocked(ttl time.Duration) {
 	s.destroyIssuedLocked()
 	s.unlocked = true
 	s.deadline = s.now().Add(ttl)
@@ -233,8 +249,11 @@ func (s *Session) Lock() {
 //
 // It returns ErrLocked when the session is closed or holds no key, so a locked session
 // cannot decrypt the vault. The identity is held as RAW BYTES and parsed ON DEMAND (not
-// cached as a parsed age.Identity) so the key material gets the same mlock+zeroize
-// at-rest protection as issued values; the parsed form is transient working memory.
+// cached as a parsed age.Identity): the at-rest raw bytes get mlock+zeroize, but the
+// parsed *age.X25519Identity returned here is NOT zeroized — it is transient working
+// memory on normal GC-managed heap, handed to the agefile backend for one operation
+// (documented limitation; the at-rest guarantee covers the stored bytes, not this
+// per-call parsed handle).
 func (s *Session) Identity() (age.Identity, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -267,19 +286,23 @@ func (s *Session) setIdentityLocked(b []byte) {
 // denied the prompt), the session stays LOCKED and we surface the error unchanged, so a
 // denied unwrap is a denied unlock.
 //
-// Locking discipline: Unlock takes s.mu itself, so we must not hold s.mu across it. We
-// fetch the bytes with no lock held, call Unlock (whose destroyIssuedLocked nils any
-// stale identity), then take s.mu only to store the new identity. That ordering is
-// deliberate — Unlock clears, then we populate — so the freshly-unwrapped key lands in a
-// clean session.
+// Locking discipline (closes a TOCTOU): the slow unwrap (a Touch ID prompt) runs
+// OUTSIDE s.mu — we deliberately do not hold the lock across a blocking biometric. But
+// the open-then-store is ONE critical section: we take s.mu once, unlockLocked (clear
+// stale + open), then setIdentityLocked (store the key), and release. Folding both under
+// a single lock means a concurrent Lock() can never interleave between opening the
+// session and storing the key — the prior code released s.mu between Unlock and the store,
+// letting a Lock() in that window re-lock + nil the identity so the subsequent store
+// stranded a LIVE mlock'd key in a session reporting LOCKED (never zeroized until a later
+// lock). There is now no state where a locked session holds a live identity.
 func (s *Session) unlockWithUnwrapper(ttl time.Duration) error {
-	b, err := s.unwrapper()
+	b, err := s.unwrapper() // Touch ID — OUTSIDE the lock (do not hold s.mu during a slow prompt)
 	if err != nil {
-		return err
+		return err // failed unwrap: session stays locked, nothing set
 	}
-	s.Unlock(ttl)
 	s.mu.Lock()
-	s.setIdentityLocked(b)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.unlockLocked(ttl)   // open + clear stale, atomically...
+	s.setIdentityLocked(b) // ...then store the key — no concurrent Lock can interleave
 	return nil
 }
