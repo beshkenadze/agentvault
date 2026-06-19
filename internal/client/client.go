@@ -170,6 +170,27 @@ func (c *Client) Remove(backend, locator string) error {
 	return nil
 }
 
+// Setup issues the "setup" RPC: it asks the daemon to provision the local age store
+// (identity + empty vault) and returns the on-disk paths plus whether files were created
+// this call. SECURITY: SetupParams/SetupResult carry NO secret — only two booleans and
+// paths — so nothing sensitive crosses the wire here. On a daemon error it returns
+// resp.Error (a *ipc.RPCError) so the caller can map its Code to an exit code.
+func (c *Client) Setup(p ipc.SetupParams) (ipc.SetupResult, error) {
+	pb, _ := json.Marshal(p)
+	resp, err := c.call(ipc.Request{ID: 1, Method: "setup", Params: pb})
+	if err != nil {
+		return ipc.SetupResult{}, err
+	}
+	if resp.Error != nil {
+		return ipc.SetupResult{}, resp.Error
+	}
+	var r ipc.SetupResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return ipc.SetupResult{}, err
+	}
+	return r, nil
+}
+
 // Ping issues the "ping" RPC and returns the daemon's reply (expected "pong").
 func (c *Client) Ping() (string, error) {
 	resp, err := c.call(ipc.Request{ID: 1, Method: "ping"})

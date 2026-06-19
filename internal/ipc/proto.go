@@ -96,6 +96,25 @@ type ScrubResult struct {
 	More   bool   `json:"more,omitempty"`
 }
 
+// SetupParams is the client request for `setup`: provision the local age store.
+// SECURITY: it carries NO secret — only two booleans. Rotate forces regeneration of
+// the identity (and a fresh empty vault) even if a store already exists; Plaintext
+// writes the identity unwrapped to identity.txt instead of the Enclave-wrapped
+// identity.enc (the escape hatch for hosts without a Secure Enclave / cgo).
+type SetupParams struct {
+	Rotate    bool `json:"rotate,omitempty"`
+	Plaintext bool `json:"plaintext,omitempty"`
+}
+
+// SetupResult is the daemon reply for `setup`. SECURITY: it reports ONLY on-disk
+// PATHS and whether files were created this call — never the identity bytes or vault
+// contents. Created is false when an existing store was left untouched (idempotent).
+type SetupResult struct {
+	VaultPath    string `json:"vault_path"`
+	IdentityPath string `json:"identity_path"`
+	Created      bool   `json:"created"`
+}
+
 // StatusResult is the daemon reply for unlock/status (and the ok reply for lock).
 // SECURITY: it reports ONLY the session's lock state and the remaining unlock
 // window — it has no field for an issued value and so can NEVER carry a secret.

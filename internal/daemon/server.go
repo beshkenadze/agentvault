@@ -72,6 +72,19 @@ type Server struct {
 	// testable without a multi-minute wait (a test sets a tiny value). It is reset
 	// per request, so it gates IDLE time between requests, not total stream time.
 	idleTimeout time.Duration
+	// provision serves the "setup" RPC: it creates the local age store (identity +
+	// empty vault) and live-wires the file backend. It is INJECTED via SetProvisioner
+	// (nil until wired) so this package links neither age nor the enclave — avd, which
+	// links both, supplies the real closure (provision.Provision with enclave.Wrap).
+	// SECURITY: it takes/returns only ipc.SetupParams/SetupResult — no secret crosses it.
+	provision func(ipc.SetupParams) (ipc.SetupResult, error)
+}
+
+// SetProvisioner injects the closure that serves the "setup" RPC. Call it after New and
+// before Serve. Keeping it injected (not a local crypto call) is what lets avd own the
+// age+enclave linkage while the daemon dispatch stays crypto-free.
+func (s *Server) SetProvisioner(f func(ipc.SetupParams) (ipc.SetupResult, error)) {
+	s.provision = f
 }
 
 // SetPresence injects the presence used by the "unlock" RPC. Call it after New and
@@ -390,6 +403,23 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		s.audit.Log(audit.Event{Kind: "rm", Name: p.Locator, Profile: p.Backend})
 		ok, _ := json.Marshal("ok")
 		return ipc.Response{ID: req.ID, Result: ok}
+	case "setup":
+		var p ipc.SetupParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
+		}
+		if s.provision == nil {
+			return errResp(req.ID, ipc.CodeInternal, "setup not configured")
+		}
+		// The provisioner creates the store and live-wires the file backend. SECURITY:
+		// SetupResult carries on-disk PATHS only (no identity/vault bytes), and a
+		// provision error is path/reason text from a crypto-free seam — never a secret.
+		res, err := s.provision(p)
+		if err != nil {
+			return errResp(req.ID, ipc.CodeInternal, err.Error())
+		}
+		out, _ := json.Marshal(res)
+		return ipc.Response{ID: req.ID, Result: out}
 	case "status":
 		if s.session == nil {
 			return errResp(req.ID, ipc.CodeInternal, "session not configured")
