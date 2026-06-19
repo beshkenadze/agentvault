@@ -60,6 +60,8 @@ func main() {
 		runRm(os.Args[2:])
 	case "init":
 		runInit(os.Args[2:])
+	case "setup":
+		runSetup(os.Args[2:])
 	default:
 		usage()
 		os.Exit(exitBadRequest)
@@ -67,7 +69,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--plaintext]  (provision the local age vault)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)")
 }
 
 func runPing() {
@@ -409,6 +411,46 @@ func runAdd(args []string) {
 		os.Exit(exitForError(err))
 	}
 	fmt.Printf("added %s\n", name)
+}
+
+// runSetup implements `av setup [--rotate] [--plaintext]`. It is a PURE RPC: it asks
+// the daemon (which links age+enclave) to provision the local age store and prints the
+// resulting on-disk PATHS only — never a secret. --rotate forces a fresh identity/vault;
+// --plaintext writes the identity unwrapped (the escape hatch for hosts without a Secure
+// Enclave). av stays thin: no age/enclave/provision import lives here.
+func runSetup(args []string) {
+	p, err := parseSetupArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	res, err := dialClient().Setup(p)
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	if res.Created {
+		fmt.Printf("created vault %s\n  identity %s\n", res.VaultPath, res.IdentityPath)
+		return
+	}
+	fmt.Printf("already provisioned: %s\n", res.VaultPath)
+}
+
+// parseSetupArgs extracts the --rotate and --plaintext bool flags from `av setup` args.
+// They take no value (only the `--flag` form); any other argument is a usage error.
+func parseSetupArgs(args []string) (ipc.SetupParams, error) {
+	var p ipc.SetupParams
+	for _, a := range args {
+		switch a {
+		case "--rotate":
+			p.Rotate = true
+		case "--plaintext":
+			p.Plaintext = true
+		default:
+			return p, fmt.Errorf("unexpected argument %q", a)
+		}
+	}
+	return p, nil
 }
 
 // runRm implements `av rm [--backend file] NAME`: it deletes NAME from the writable

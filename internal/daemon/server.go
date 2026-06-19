@@ -173,7 +173,9 @@ func errResp2(id uint64, backendID string, err error) ipc.Response {
 // (rejection nil) or a ready-to-send error Response and nil Writer: the registry not
 // being wired is CodeInternal; an unknown or READ-ONLY backend is CodeBadRequest
 // ("read-only" / "no such backend") — the latter is how a write against 1p/keychain
-// fails fast instead of half-mutating an external store.
+// fails fast instead of half-mutating an external store. The "file" backend is the
+// special zero-config case: when it is missing there is no local vault yet, so the
+// rejection points the user at `av setup` (still CodeBadRequest, so av exits 2).
 func (s *Server) writer(id uint64, backendID string) (backend.Writer, *ipc.Response) {
 	if s.reg == nil {
 		r := errResp(id, ipc.CodeInternal, "registry not configured")
@@ -181,7 +183,11 @@ func (s *Server) writer(id uint64, backendID string) (backend.Writer, *ipc.Respo
 	}
 	w, ok := s.reg.Writer(backendID)
 	if !ok {
-		r := errResp(id, ipc.CodeBadRequest, fmt.Sprintf("backend %q is read-only or not registered", backendID))
+		msg := fmt.Sprintf("backend %q is read-only or not registered", backendID)
+		if backendID == "file" {
+			msg = "no local vault — run 'av setup' first"
+		}
+		r := errResp(id, ipc.CodeBadRequest, msg)
 		return nil, &r
 	}
 	return w, nil
