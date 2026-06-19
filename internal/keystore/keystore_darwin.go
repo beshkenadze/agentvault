@@ -77,11 +77,15 @@ func securityExec(args ...string) ([]byte, error) {
 // is prompt-free. See the package SECURITY note: the identity is on the argv for the
 // duration of this exec, and never appears in an error or log.
 func (s *Store) Store(identity []byte) error {
+	// Store WITHOUT a trailing newline: `security ... -w` prints values containing a
+	// newline (or other non-printable bytes) back as a HEX dump rather than the raw
+	// string, which would corrupt the identity on Read. The age identity is pure
+	// printable bech32, so stripping the trailing "\n" keeps the round-trip lossless.
 	_, err := s.run(
 		"add-generic-password", "-U",
 		"-s", service,
 		"-a", account,
-		"-w", string(identity),
+		"-w", strings.TrimRight(string(identity), "\n"),
 		"-T", "/usr/bin/security",
 	)
 	if err != nil {

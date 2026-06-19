@@ -52,6 +52,30 @@ func TestStoreIssuesAddGenericPasswordArgs(t *testing.T) {
 	}
 }
 
+func TestStoreTrimsTrailingNewline(t *testing.T) {
+	// REGRESSION: a trailing newline in the stored value makes `security ... -w` emit the
+	// value back as a HEX dump on Read (security treats newline-bearing data as binary),
+	// corrupting the identity. Store must strip the trailing "\n" so the -w arg is the
+	// pure printable bech32 identity.
+	const identity = "AGE-SECRET-KEY-1EXAMPLE"
+	m := &mockRunner{}
+	s := NewWithRunner(m.run)
+
+	if err := s.Store([]byte(identity + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	// the -w value is the arg right after "-w"
+	var got string
+	for i, a := range m.gotArgs {
+		if a == "-w" && i+1 < len(m.gotArgs) {
+			got = m.gotArgs[i+1]
+		}
+	}
+	if got != identity {
+		t.Fatalf("stored -w value = %q, want %q (trailing newline must be stripped)", got, identity)
+	}
+}
+
 func TestReadReturnsTrimmedValue(t *testing.T) {
 	// `security ... -w` writes ONLY the password to stdout (trailing newline); trim it.
 	const identity = "AGE-SECRET-KEY-1EXAMPLE"
