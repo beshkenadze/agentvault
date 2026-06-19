@@ -14,6 +14,12 @@ Therefore `avd` must run as a **per-user LaunchAgent**, never as a system
 > **manual verification path** for the Touch ID work in Phase 5 — a green `go build`
 > proves the cgo compiles, not that the prompt works; only this does.
 
+> **Provisioning the vault:** you do not need to create an identity file by hand. Run
+> `av setup` once (after `avd` is running) and it auto-picks the best key tier — the
+> login keychain on a build-from-source install (no on-disk `identity.txt`). The
+> `__AGE_IDENTITY_FILE__` placeholder below is only relevant to the explicit plaintext
+> tier (`av setup --plaintext`). See the README's "Identity protection tiers".
+
 ## Install
 
 1. Build the binaries:
