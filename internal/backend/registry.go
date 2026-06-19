@@ -3,6 +3,7 @@ package backend
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // ErrNotFound is returned by a backend when a locator has no value.
@@ -10,11 +11,12 @@ var ErrNotFound = errors.New("secret not found")
 
 // Registry dispatches av:// references to registered backends by backend id.
 //
-// Registration is expected to happen once at startup, before the registry begins
-// serving Resolve/List calls. A Registry is NOT safe for concurrent Register with
-// Resolve/List (or for concurrent Register calls); the daemon (Phase 4) must finish
-// wiring all backends before it starts handling requests.
+// A Registry is SAFE for concurrent use: an RWMutex guards the backends map, so the
+// live `setup` provisioner can Register("file", ...) from one goroutine while request
+// goroutines call Resolve/List/Writer — the case that arises when `av setup` re-wires
+// the file backend on a running daemon.
 type Registry struct {
+	mu       sync.RWMutex // guards backends against concurrent Register vs Resolve/List/Writer
 	backends map[string]Backend
 }
 
@@ -25,9 +27,11 @@ func NewRegistry() *Registry {
 // Register adds a backend under an id (e.g. "file", "1p", "keychain"). It OVERWRITES
 // any existing backend under that id (it is a map assignment, not append-only): the
 // live `setup` provisioner relies on this to re-wire "file" against a freshly
-// provisioned store without a daemon restart. The concurrency note above still holds —
-// re-registration must happen before/outside concurrent Resolve/List.
+// provisioned store without a daemon restart. The write lock serializes it against
+// concurrent readers (Resolve/List/Writer).
 func (r *Registry) Register(id string, b Backend) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.backends[id] = b
 }
 
@@ -37,7 +41,9 @@ func (r *Registry) Resolve(ref string) (Secret, error) {
 	if err != nil {
 		return Secret{}, err
 	}
+	r.mu.RLock()
 	b, ok := r.backends[p.Backend]
+	r.mu.RUnlock()
 	if !ok {
 		return Secret{}, fmt.Errorf("no backend registered for %q", p.Backend)
 	}
@@ -46,7 +52,9 @@ func (r *Registry) Resolve(ref string) (Secret, error) {
 
 // List returns metadata (no values) from one backend.
 func (r *Registry) List(backendID, prefix string) ([]Meta, error) {
+	r.mu.RLock()
 	b, ok := r.backends[backendID]
+	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("no backend registered for %q", backendID)
 	}
@@ -58,7 +66,9 @@ func (r *Registry) List(backendID, prefix string) ([]Meta, error) {
 // (1p, keychain) is registered but returns ok=false, so the caller (the "add"/"rm"
 // dispatch) can reject the write rather than half-mutate an external store.
 func (r *Registry) Writer(backendID string) (Writer, bool) {
+	r.mu.RLock()
 	b, ok := r.backends[backendID]
+	r.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}

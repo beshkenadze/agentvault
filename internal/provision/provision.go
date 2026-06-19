@@ -115,13 +115,20 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// writeAtomic writes data to path via a temp file in the SAME dir (so the rename is
-// atomic on one filesystem), fsyncing before the rename and removing the temp on any
-// error so a partial file never lingers. Mode is 0600 — the identity is secret material.
+// writeAtomic writes data to path via a UNIQUE temp file in the SAME dir (so the rename
+// is atomic on one filesystem), fsyncing before the rename and removing the temp on any
+// error so a partial file never lingers. The temp name is os.CreateTemp(<base>.tmp-*),
+// NOT a fixed "<path>.tmp", so two concurrent `av setup` runs can't truncate each other's
+// staging file. Mode is 0600 — the identity is secret material (CreateTemp opens 0600).
 func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
@@ -146,15 +153,22 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-// writeVaultAtomic encrypts an empty name->value map to a temp file via
-// agefile.EncryptVault, fsyncs, then renames it over the vault path (atomic). On any
-// error before the rename it removes the temp so no partial vault is left behind.
+// writeVaultAtomic encrypts an empty name->value map to a UNIQUE temp file via
+// agefile.EncryptVault, fsyncs, then renames it over the vault path (atomic). The temp
+// name is os.CreateTemp(<base>.tmp-*), NOT a fixed "<path>.tmp", so two concurrent
+// `av setup` runs can't truncate each other's staging vault. On any error before the
+// rename it removes the temp so no partial vault is left behind.
 // SECURITY: errors carry the path only — never the (empty here) vault contents.
 func writeVaultAtomic(vaultPath string, recipient age.Recipient) error {
-	tmp := vaultPath + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(vaultPath), filepath.Base(vaultPath)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp vault: %w", err)
+	}
+	tmp := f.Name()
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("chmod temp vault: %w", err)
 	}
 	if err := agefile.EncryptVault(f, recipient, map[string]string{}); err != nil {
 		f.Close()

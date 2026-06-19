@@ -306,10 +306,12 @@ func mapEnclaveErr(err error) error {
 // It reuses the SAME wrap/unwrap seam and config default paths as registerBackends (DRY)
 // — no duplicated path logic.
 //
-// Live re-wiring: for the wrapped (default) store it sets the session unwrapper for the
-// new identity.enc and registers agefile.New(sess, vault); for a --plaintext store it
-// eagerly loads identity.txt into a Static source. Registry.Register overwrites by id, so
-// re-running setup (e.g. --rotate) cleanly replaces the "file" backend.
+// Live re-wiring (only when r.Created — a fresh provision or --rotate): for the wrapped
+// (default) store it sets the session unwrapper for the new identity.enc and registers
+// agefile.New(sess, vault); for a --plaintext store it eagerly loads identity.txt into a
+// Static source. Registry.Register overwrites by id, so re-running setup (e.g. --rotate)
+// cleanly replaces the "file" backend. An idempotent Created:false result skips the
+// re-wire: the backend is already wired (startup auto-discovery or a prior setup).
 //
 // SECURITY: only ipc.SetupParams/SetupResult cross this seam (booleans + on-disk paths);
 // no secret material is logged, returned, or embedded in an error.
@@ -323,15 +325,19 @@ func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap f
 		if err != nil {
 			return ipc.SetupResult{}, err
 		}
-		// (Re)wire the file backend LIVE against the freshly provisioned store. This runs
-		// whether the store was newly created or already present (idempotent setup), so a
-		// daemon that started before `av setup` picks up the new backend without a restart.
-		if p.Plaintext {
-			if werr := wirePlaintextBackend(reg, r.IdentityPath, r.VaultPath); werr != nil {
-				return ipc.SetupResult{}, werr
+		// (Re)wire the file backend LIVE against the freshly provisioned store, but ONLY
+		// when this call actually created/rotated it (r.Created). On an idempotent
+		// Created:false result the backend is already wired — at startup (auto-discovery)
+		// or by a prior setup — so re-registering it would be redundant churn and the
+		// "file backend identity: ..." log line would be misleading. Skip it.
+		if r.Created {
+			if p.Plaintext {
+				if werr := wirePlaintextBackend(reg, r.IdentityPath, r.VaultPath); werr != nil {
+					return ipc.SetupResult{}, werr
+				}
+			} else {
+				wireEnclaveBackend(reg, sess, unwrap, r.IdentityPath, r.VaultPath)
 			}
-		} else {
-			wireEnclaveBackend(reg, sess, unwrap, r.IdentityPath, r.VaultPath)
 		}
 		return ipc.SetupResult{VaultPath: r.VaultPath, IdentityPath: r.IdentityPath, Created: r.Created}, nil
 	}

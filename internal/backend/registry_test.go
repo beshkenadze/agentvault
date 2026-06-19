@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -72,4 +73,62 @@ func TestRegistryListNoValues(t *testing.T) {
 		t.Fatalf("got %d metas, want 2", len(metas))
 	}
 	// Meta has no value field — compile-time guarantee values aren't leaked by List.
+}
+
+// writableBackend is a mockBackend that also implements Writer, so Registry.Writer
+// returns ok=true for it (read-only mockBackend would not exercise the Writer reader).
+type writableBackend struct{ mockBackend }
+
+func (w *writableBackend) Add(name, value string) error { return nil }
+func (w *writableBackend) Remove(name string) error     { return nil }
+
+// TestRegistryConcurrentRegisterResolve is the regression test for the data race fixed
+// by the RWMutex: it hammers Register("file", ...) from many goroutines concurrently
+// with Resolve/Writer/List, mirroring the live-`setup` re-wire racing request goroutines.
+// Under `go test -race` this FAILS on the old (unguarded-map) Registry and PASSES now.
+// It also asserts results stay consistent: Resolve always sees one of the registered
+// values (never a torn read) or the not-yet-registered error.
+func TestRegistryConcurrentRegisterResolve(t *testing.T) {
+	r := NewRegistry()
+	// Seed "file" so readers can also hit a present backend, not only the unregistered
+	// path; the writers below keep overwriting it (the re-wire that setup performs).
+	r.Register("file", &writableBackend{mockBackend{data: map[string]string{"K": "v0"}}})
+
+	const goroutines = 16
+	const iters = 200
+	var wg sync.WaitGroup
+
+	// Writers: re-register "file" repeatedly (the live-setup re-wire).
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				r.Register("file", &writableBackend{mockBackend{data: map[string]string{"K": "v"}}})
+			}
+		}(g)
+	}
+
+	// Readers: Resolve/List/Writer concurrently with the re-registrations.
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				if got, err := r.Resolve("av://file/K"); err != nil {
+					t.Errorf("Resolve: %v", err)
+				} else if got.Value != "v0" && got.Value != "v" {
+					t.Errorf("Resolve value = %q, want v0 or v", got.Value)
+				}
+				if _, err := r.List("file", ""); err != nil {
+					t.Errorf("List: %v", err)
+				}
+				if _, ok := r.Writer("file"); !ok {
+					t.Errorf("Writer(file) = !ok, want a writable backend")
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }

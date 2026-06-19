@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -78,6 +79,11 @@ type Server struct {
 	// links both, supplies the real closure (provision.Provision with enclave.Wrap).
 	// SECURITY: it takes/returns only ipc.SetupParams/SetupResult — no secret crosses it.
 	provision func(ipc.SetupParams) (ipc.SetupResult, error)
+	// setupMu serializes the whole setup case: each connection runs in its own goroutine,
+	// so two concurrent `av setup` RPCs would otherwise race the provision write AND the
+	// live re-wire it triggers (registry Register + session unwrapper swap). Holding it
+	// around s.provision(p) makes provisioning + re-wire one critical section.
+	setupMu sync.Mutex
 }
 
 // SetProvisioner injects the closure that serves the "setup" RPC. Call it after New and
@@ -420,7 +426,11 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		// The provisioner creates the store and live-wires the file backend. SECURITY:
 		// SetupResult carries on-disk PATHS only (no identity/vault bytes), and a
 		// provision error is path/reason text from a crypto-free seam — never a secret.
+		// WHY setupMu: two concurrent setup RPCs (each a separate handle goroutine) must
+		// not interleave the provision write and its live re-wire — serialize the pair.
+		s.setupMu.Lock()
 		res, err := s.provision(p)
+		s.setupMu.Unlock()
 		if err != nil {
 			return errResp(req.ID, ipc.CodeInternal, err.Error())
 		}
