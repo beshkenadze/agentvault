@@ -97,13 +97,21 @@ type ScrubResult struct {
 }
 
 // SetupParams is the client request for `setup`: provision the local age store.
-// SECURITY: it carries NO secret — only two booleans. Rotate forces regeneration of
-// the identity (and a fresh empty vault) even if a store already exists; Plaintext
-// writes the identity unwrapped to identity.txt instead of the Enclave-wrapped
-// identity.enc (the escape hatch for hosts without a Secure Enclave / cgo).
+// SECURITY: it carries NO secret — only booleans and a tier name. Rotate forces
+// regeneration of the identity (and a fresh empty vault) even if a store already
+// exists.
+//
+// Tier picks the protection tier explicitly ("enclave"/"keychain"/"plaintext"); ""
+// means auto (Enclave→keychain, never plaintext). RequireEnclave forbids the
+// Enclave→keychain downgrade so a Wrap failure becomes a hard error instead of a
+// silent keychain fallback. Plaintext is the LEGACY flag kept for back-compat: when
+// Tier is unset it is mapped to Tier=plaintext (the explicit escape hatch for hosts
+// without a Secure Enclave / cgo). New callers should set Tier directly.
 type SetupParams struct {
-	Rotate    bool `json:"rotate,omitempty"`
-	Plaintext bool `json:"plaintext,omitempty"`
+	Rotate         bool   `json:"rotate,omitempty"`
+	Plaintext      bool   `json:"plaintext,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	RequireEnclave bool   `json:"require_enclave,omitempty"`
 }
 
 // SetupResult is the daemon reply for `setup`. SECURITY: it reports ONLY on-disk

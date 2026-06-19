@@ -230,6 +230,60 @@ func buildAndAutostartZeroConfig(t *testing.T) (sockPath, cfgDir string) {
 	return sockPath, cfgDir
 }
 
+// buildAndAutostartKeychain is buildAndAutostartZeroConfig for the KEYCHAIN tier: same
+// zero-config auto-discovery (temp HOME + XDG_CONFIG_HOME, NO AV_AGE_* env), but it sets
+// AV_TEST_KEYSTORE=<keystoreDir> (the file-backed keystore stub, so the keychain tier is
+// exercised hermetically WITHOUT touching the real login keychain) and DELIBERATELY does
+// NOT set AV_TEST_ENCLAVE. With no enclave stub, setup's Wrap is the REAL enclave.Wrap,
+// which fails on this unsigned test binary (no Secure-Enclave entitlement, or cgo-off in
+// CI) — so provision AUTO-FALLS-BACK to the keychain tier. AV_TEST_AUTH=allow lets the
+// keychain unwrapper's presence.Prompt succeed without a biometric prompt.
+//
+// It returns the socket path, the config dir the vault lands in, and the keystore dir the
+// stub identity file is written to (so the test can assert it appears).
+func buildAndAutostartKeychain(t *testing.T) (sockPath, cfgDir, keystoreDir string) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "avk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	avd := filepath.Join(dir, "avd")
+	build := exec.Command("go", "build", "-o", avd, "github.com/beshkenadze/agentvault/cmd/avd")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build avd: %v\n%s", err, out)
+	}
+
+	keystoreDir = filepath.Join(dir, "ks")
+	if err := os.MkdirAll(keystoreDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AV_AVD_PATH", avd)
+	t.Setenv("XDG_RUNTIME_DIR", dir) // socket resolves under this short dir
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("AV_TEST_AUTH", "allow")         // keychain unwrapper's presence prompt + dangerous-tier
+	t.Setenv("AV_TEST_KEYSTORE", keystoreDir) // file-backed keystore stub (no real login keychain)
+	// No AV_TEST_ENCLAVE: the real enclave.Wrap fails here → provision falls back to keychain.
+	t.Setenv("AV_TEST_ENCLAVE", "")
+	// Belt-and-braces: no AV_AGE_* leaks in so we truly exercise auto-discovery + setup.
+	os.Unsetenv("AV_AGE_VAULT")
+	os.Unsetenv("AV_AGE_IDENTITY")
+	os.Unsetenv("AV_AGE_IDENTITY_ENCLAVE")
+
+	cfgDir = filepath.Join(dir, "xdg", "agentvault")
+	sockPath = filepath.Join(dir, "agentvault", "avd.sock")
+	t.Cleanup(func() {
+		_ = exec.Command("pkill", "-f", avd).Run()
+		_ = os.Remove(sockPath)
+		_ = os.Remove(sockPath + ".lock")
+	})
+	return sockPath, cfgDir, keystoreDir
+}
+
 // assertNoSecret fails if the real secret appears anywhere in the given buffers.
 func assertNoSecret(t *testing.T, where string, bufs ...*bytes.Buffer) {
 	t.Helper()
@@ -528,5 +582,101 @@ func TestE2EZeroConfigSetupThenRun(t *testing.T) {
 	}
 	if strings.Contains(out.String(), npmSecret) || strings.Contains(errBuf.String(), npmSecret) {
 		t.Fatalf("zero-config secret leaked: out=%q err=%q", out.String(), errBuf.String())
+	}
+}
+
+// TestE2EKeychainTierSetupThenRun is the Task-3 keychain-tier guard: it proves the
+// keychain tier works end-to-end through the REAL avd with NO AV_AGE_* env, exercising
+// the AUTO-FALLBACK from enclave to keychain.
+//
+//  1. `setup` with no AV_TEST_ENCLAVE: the real enclave.Wrap fails (unsigned test binary /
+//     cgo-off CI), so provision falls back to the keychain tier — it stores the identity
+//     via the file-backed keystore stub (AV_TEST_KEYSTORE) and reports the keychain
+//     locator as IdentityPath (no on-disk identity file). The stub identity file appears.
+//  2. setup LIVE-wires the file backend with the KEYCHAIN session unwrapper (presence
+//     prompt + keystore read) — no daemon restart.
+//  3. `av add` writes the vault, `av unlock` drives the keychain unwrapper (presence via
+//     AV_TEST_AUTH=allow, then the keystore read), and `av run` masks the value with the
+//     real secret nowhere.
+//
+// (If a dev machine's real Enclave unexpectedly SUCCEEDED here, setup would land on the
+// enclave tier instead — force keychain via cl.Setup(ipc.SetupParams{Tier: "keychain"}).
+// We prefer exercising the auto-fallback, which holds on this unsigned binary and in CI.)
+func TestE2EKeychainTierSetupThenRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: builds and spawns the real avd")
+	}
+	sockPath, cfgDir, keystoreDir := buildAndAutostartKeychain(t)
+	cl := New(sockPath)
+
+	const kcSecret = "kc_REAL_e2e_keychain"
+
+	// 1. Provision: enclave Wrap fails → keychain fallback. IdentityPath is the keychain
+	// locator (no on-disk identity file), and the keystore stub file is written.
+	res, err := cl.Setup(ipc.SetupParams{})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if !res.Created {
+		t.Fatalf("setup: want Created=true on first setup, got %+v", res)
+	}
+	wantVault := filepath.Join(cfgDir, "vault.age")
+	if res.VaultPath != wantVault {
+		t.Fatalf("setup vault path = %q, want %q", res.VaultPath, wantVault)
+	}
+	// The keychain tier reports the keychain locator, NOT an on-disk identity path — this
+	// is the load-bearing assertion that the keychain tier (not enclave/plaintext) was chosen.
+	if res.IdentityPath != "keychain:agentvault/identity" {
+		t.Fatalf("setup identity path = %q, want keychain locator (keychain tier)", res.IdentityPath)
+	}
+	// No on-disk identity file for the keychain tier.
+	if _, statErr := os.Stat(filepath.Join(cfgDir, "identity.enc")); statErr == nil {
+		t.Fatalf("keychain tier must not write identity.enc")
+	}
+	if _, statErr := os.Stat(filepath.Join(cfgDir, "identity.txt")); statErr == nil {
+		t.Fatalf("keychain tier must not write identity.txt")
+	}
+	// The keystore stub stored the identity into its file-backed item.
+	if _, statErr := os.Stat(filepath.Join(keystoreDir, "identity")); statErr != nil {
+		t.Fatalf("keychain stub identity not stored: %v", statErr)
+	}
+
+	// 2+3. The file backend is live-wired with the KEYCHAIN unwrapper. unlock drives the
+	// presence prompt (AV_TEST_AUTH=allow) then the keystore read, proving the keychain
+	// WithUnwrapper path; then add + run masks the value.
+	if err := cl.Unlock(); err != nil {
+		t.Fatalf("unlock after setup: %v", err)
+	}
+	if err := cl.Add("file", "KC_TOKEN", []byte(kcSecret)); err != nil {
+		t.Fatalf("add after setup: %v", err)
+	}
+
+	manifestPath := filepath.Join(cfgDir, "agentvault.yaml")
+	manifest := "profiles:\n" +
+		"  kc:\n" +
+		"    KC_TOKEN:\n" +
+		"      ref: av://file/KC_TOKEN\n" +
+		"      tier: normal\n"
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code, err := Run(cl, RunOptions{
+		Profile:      "kc",
+		ManifestPath: manifestPath,
+		Command:      []string{"sh", "-c", "echo got=$KC_TOKEN"},
+	}, &out, &errBuf)
+	if err != nil {
+		t.Fatalf("run: %v (stderr=%q)", err, errBuf.String())
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := strings.TrimSpace(out.String()); got != "got={{AV:KC_TOKEN}}" {
+		t.Fatalf("stdout = %q, want got={{AV:KC_TOKEN}}", got)
+	}
+	if strings.Contains(out.String(), kcSecret) || strings.Contains(errBuf.String(), kcSecret) {
+		t.Fatalf("keychain-tier secret leaked: out=%q err=%q", out.String(), errBuf.String())
 	}
 }

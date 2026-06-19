@@ -22,6 +22,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/detect/gitleaks"
 	"github.com/beshkenadze/agentvault/internal/enclave"
 	"github.com/beshkenadze/agentvault/internal/ipc"
+	"github.com/beshkenadze/agentvault/internal/keystore"
 	"github.com/beshkenadze/agentvault/internal/provision"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
@@ -48,12 +49,22 @@ func main() {
 	// startup path and the live `setup` provisioner share identical crypto (DRY).
 	sess := daemon.NewSession(daemon.DefaultTTL)
 	wrap, unwrap := enclaveFuncs()
+	store, read := keystoreFuncs()
+
+	// One presence instance is shared by BOTH the unlock RPC (SetPresence) and the
+	// dangerous-tier resolver (NewResolver), so unlock and dangerous-tier resolve go
+	// through the same auth seam. Production uses real Touch ID; AV_TEST_AUTH=allow
+	// selects the env-gated stub so e2e/CI stay automatable without a biometric prompt.
+	// It is created BEFORE registerBackends because the non-enclave discovery tiers
+	// (keychain/plaintext) wrap THIS presence into their session unwrappers (one touch
+	// per unlock; see tierUnwrapper).
+	presence := selectPresence()
 
 	// Wire the resolver so `resolve` can broker secrets and `scrub` can mask them
 	// against the same session. cmd/avd only assembles plumbing — it never reads a
 	// secret value itself; the agefile backend decrypts inside avd on demand.
 	reg := backend.NewRegistry()
-	registerBackends(reg, sess, unwrap)
+	registerBackends(reg, sess, srv, unwrap, read, presence)
 
 	// Layer-2 net: wire the gitleaks detector into the session so scrub catches
 	// DERIVED secrets the daemon never issued and dangerous-tier values that are never
@@ -66,12 +77,6 @@ func main() {
 		log.Fatalf("avd: gitleaks detector: %v", err)
 	}
 	sess.WithDetector(det)
-
-	// One presence instance is shared by BOTH the unlock RPC (SetPresence) and the
-	// dangerous-tier resolver (NewResolver), so unlock and dangerous-tier resolve go
-	// through the same auth seam. Production uses real Touch ID; AV_TEST_AUTH=allow
-	// selects the env-gated stub so e2e/CI stay automatable without a biometric prompt.
-	presence := selectPresence()
 
 	// Append-only audit log (default-on for the real daemon): one metadata-only entry
 	// per dangerous touch — issuance, unlock, lock, rate-limit alert, denied access. It
@@ -88,7 +93,7 @@ func main() {
 	// following `av add`/`av run` works with NO daemon restart. It reuses the SAME
 	// wrap/unwrap seam and default paths as registerBackends (DRY) — avd owns the
 	// age+enclave linkage while the daemon dispatch stays crypto-free.
-	srv.SetProvisioner(makeProvisioner(reg, sess, wrap, unwrap))
+	srv.SetProvisioner(makeProvisioner(reg, sess, srv, wrap, unwrap, store, read, presence))
 
 	// Auto-lock observers (screen-lock/sleep on darwin; no-op elsewhere) re-lock the
 	// SAME session. stop() removes them on shutdown.
@@ -171,33 +176,48 @@ func openAuditLog(socketPath string) audit.Logger {
 // the identity only to construct the backend, and the vault is decrypted lazily inside
 // the backend on each Resolve. Identity bytes never appear in a log or error; errors
 // carry only a path/reason or an OSStatus, never key material.
-func registerBackends(reg *backend.Registry, sess *daemon.Session, unwrap func([]byte) ([]byte, error)) {
+func registerBackends(reg *backend.Registry, sess *daemon.Session, srv *daemon.Server, unwrap func([]byte) ([]byte, error), read func() ([]byte, error), presence daemon.Presence) {
 	registered := []string{}
 
 	vaultPath := os.Getenv("AV_AGE_VAULT")
 	enclavePath := os.Getenv("AV_AGE_IDENTITY_ENCLAVE")
 	idPath := os.Getenv("AV_AGE_IDENTITY")
 
-	// When NONE of the AV_AGE_* env vars are set, fall back to the auto-discovered
-	// default store: a vault + an identity (Enclave-wrapped preferred) already on disk.
-	if vaultPath == "" && enclavePath == "" && idPath == "" {
-		vaultPath, enclavePath, idPath = discoverDefaultStore()
-	}
+	// Active tier for the future `version` RPC: assume "no local vault" until a backend is
+	// wired below. SetKeyTier is also called by makeProvisioner after a live `setup`.
+	srv.SetKeyTier("none", false)
 
 	switch {
-	case vaultPath == "" || (enclavePath == "" && idPath == ""):
-		log.Printf("avd: no file backend (run `av setup`, or set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext])")
-	case enclavePath != "":
-		// HARDENED path: lazy, session-coupled — no startup unwrap, no login Touch ID.
-		wireEnclaveBackend(reg, sess, unwrap, enclavePath, vaultPath)
-		registered = append(registered, "file")
-	default:
-		// FALLBACK path: eager plaintext load into a Static source.
-		if err := wirePlaintextBackend(reg, idPath, vaultPath); err != nil {
-			// The error carries only a path/reason, never key material.
-			log.Printf("avd: file backend disabled: %v", err)
-		} else {
+	case vaultPath != "" || enclavePath != "" || idPath != "":
+		// EXPLICIT env wiring (AV_AGE_*): the original env path, unchanged. The keychain
+		// tier is NOT reachable via env (no AV_AGE_* names it) — it is a discovery/`setup`
+		// tier only. enclave/plaintext here keep their original eager/lazy behavior.
+		switch {
+		case vaultPath == "" || (enclavePath == "" && idPath == ""):
+			log.Printf("avd: no file backend (run `av setup`, or set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext])")
+		case enclavePath != "":
+			// HARDENED path: lazy, session-coupled — no startup unwrap, no login Touch ID.
+			wireEnclaveBackend(reg, sess, unwrap, enclavePath, vaultPath)
+			srv.SetKeyTier(string(provision.TierEnclave), true)
 			registered = append(registered, "file")
+		default:
+			// FALLBACK path: eager plaintext load into a Static source.
+			if err := wirePlaintextBackend(reg, idPath, vaultPath); err != nil {
+				// The error carries only a path/reason, never key material.
+				log.Printf("avd: file backend disabled: %v", err)
+			} else {
+				srv.SetKeyTier(string(provision.TierPlaintext), false)
+				registered = append(registered, "file")
+			}
+		}
+	default:
+		// AUTO-DISCOVERY (no AV_AGE_* at all): detect the tier under the config-default
+		// store and wire its per-tier session unwrapper (DRY with the live `setup` path).
+		if tier, vp := discoverDefaultStore(read); tier != "" {
+			wireTier(reg, sess, srv, tier, vp, unwrap, read, presence)
+			registered = append(registered, "file")
+		} else {
+			log.Printf("avd: no file backend (run `av setup`, or set AV_AGE_VAULT and AV_AGE_IDENTITY_ENCLAVE [hardened] or AV_AGE_IDENTITY [plaintext])")
 		}
 	}
 
@@ -216,26 +236,50 @@ func registerBackends(reg *backend.Registry, sess *daemon.Session, unwrap func([
 	log.Printf("avd: registered backends: %s", strings.Join(registered, " "))
 }
 
-// discoverDefaultStore probes the config-default store directory for an existing vault
-// + identity and returns the paths to wire, mirroring the env precedence (Enclave wins
-// over plaintext). It returns empty strings for anything missing, so the caller's
-// "vault == \"\" || no identity" guard skips the file backend when no store exists yet
-// (the common pre-`av setup` state). It NEVER creates anything — `av setup` provisions;
-// this only discovers.
-func discoverDefaultStore() (vaultPath, enclavePath, idPath string) {
+// discoverDefaultStore probes the config-default store directory for an existing vault +
+// identity and returns the protection TIER plus the vault path to wire. It mirrors the
+// provision tier precedence (identity.enc→enclave, else a keychain item→keychain, else
+// identity.txt→plaintext). It returns "" tier when no usable store exists (no vault, or a
+// vault with no readable identity), so the caller skips the file backend in the common
+// pre-`av setup` state. It NEVER creates anything — `av setup` provisions; this only
+// discovers.
+//
+// Keychain detection reads the keychain item and DISCARDS the bytes immediately (only its
+// presence matters): a backend.ErrNotFound means absent, any read SUCCESS means present.
+// SECURITY: the read identity bytes are never held, logged, or returned here — only the
+// boolean "present" survives.
+func discoverDefaultStore(read func() ([]byte, error)) (tier provision.Tier, vaultPath string) {
 	vault := config.DefaultVaultPath()
 	if !fileExists(vault) {
-		return "", "", "" // no vault → nothing to wire (e.g. before `av setup`)
+		return "", "" // no vault → nothing to wire (e.g. before `av setup`)
 	}
-	if enc := config.DefaultEnclaveIdentityPath(); fileExists(enc) {
+	if fileExists(config.DefaultEnclaveIdentityPath()) {
 		log.Printf("avd: auto-discovered default store (Enclave identity)")
-		return vault, enc, ""
+		return provision.TierEnclave, vault
 	}
-	if plain := config.DefaultPlaintextIdentityPath(); fileExists(plain) {
+	if keychainHasIdentity(read) {
+		log.Printf("avd: auto-discovered default store (keychain identity)")
+		return provision.TierKeychain, vault
+	}
+	if fileExists(config.DefaultPlaintextIdentityPath()) {
 		log.Printf("avd: auto-discovered default store (plaintext identity)")
-		return vault, "", plain
+		return provision.TierPlaintext, vault
 	}
-	return "", "", "" // vault present but no identity → can't wire a reader
+	return "", "" // vault present but no identity → can't wire a reader
+}
+
+// keychainHasIdentity reports whether a keychain identity item is present by attempting a
+// read and discarding the bytes. A backend.ErrNotFound is "absent" (false); a successful
+// read is "present" (true). Any OTHER error (permission/transport, or the non-darwin
+// "requires macOS" stub) is treated as "absent" so discovery fails safe — we never wire a
+// keychain tier we can't actually read. SECURITY: the read bytes are dropped on the floor;
+// only the boolean escapes.
+func keychainHasIdentity(read func() ([]byte, error)) bool {
+	b, err := read()
+	for i := range b {
+		b[i] = 0 // best-effort scrub the discarded copy; presence is all we keep
+	}
+	return err == nil
 }
 
 // fileExists reports whether path is an existing file (any stat success). A transient
@@ -244,6 +288,70 @@ func discoverDefaultStore() (vaultPath, enclavePath, idPath string) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// tierUnwrapper builds the session unwrapper (the func() ([]byte,error) for
+// sess.WithUnwrapper) for a discovered/provisioned TIER. It is the SSOT the startup
+// discovery path and the live `setup` provisioner both use, so the two never diverge:
+//
+//   - enclave: read identity.enc and unwrap it. The Secure-Enclave Unwrap SELF-PROMPTS
+//     (the key ACL fires Touch ID), so this path does NOT call presence.Prompt — the
+//     unwrap IS the presence proof. mapEnclaveErr turns a user-cancel into ErrDenied.
+//   - keychain: prompt presence (one Touch ID), then read the identity from the keychain.
+//   - plaintext: prompt presence (one Touch ID), then read identity.txt.
+//
+// The non-enclave tiers call presence.Prompt THEMSELVES so unlockWithUnwrapper stays
+// uniform (it just calls the unwrapper) and every tier yields exactly one touch per
+// unlock. SECURITY: the identity bytes flow only back to the session — never to a log or
+// error; the enclave blob/unwrapped bytes likewise never reach a log.
+func tierUnwrapper(tier provision.Tier, encPath, idTxtPath string, presence daemon.Presence, unwrap func([]byte) ([]byte, error), read func() ([]byte, error)) func() ([]byte, error) {
+	switch tier {
+	case provision.TierKeychain:
+		return func() ([]byte, error) {
+			if err := presence.Prompt("Unlock AgentVault"); err != nil {
+				return nil, err
+			}
+			return read()
+		}
+	case provision.TierPlaintext:
+		return func() ([]byte, error) {
+			if err := presence.Prompt("Unlock AgentVault"); err != nil {
+				return nil, err
+			}
+			return os.ReadFile(idTxtPath)
+		}
+	default: // enclave: self-prompting via the key ACL; no presence.Prompt here.
+		return func() ([]byte, error) {
+			blob, err := os.ReadFile(encPath)
+			if err != nil {
+				return nil, err
+			}
+			b, err := unwrap(blob)
+			return b, mapEnclaveErr(err)
+		}
+	}
+}
+
+// wireTier installs the per-tier session unwrapper (tierUnwrapper) and registers the file
+// backend against the session for a discovered/provisioned store, then records the active
+// tier for the future `version` RPC. It is the SSOT shared by startup auto-discovery and
+// the live `setup` provisioner (DRY): both pass the config-default identity paths so the
+// closures read the right file/keychain on unlock. SECURITY: no key material is logged
+// here; only the chosen tier is.
+func wireTier(reg *backend.Registry, sess *daemon.Session, srv *daemon.Server, tier provision.Tier, vaultPath string, unwrap func([]byte) ([]byte, error), read func() ([]byte, error), presence daemon.Presence) {
+	encPath := config.DefaultEnclaveIdentityPath()
+	idTxtPath := config.DefaultPlaintextIdentityPath()
+	switch tier {
+	case provision.TierKeychain:
+		log.Printf("avd: file backend identity: login keychain (Touch ID on unlock, lazy)")
+	case provision.TierPlaintext:
+		log.Printf("avd: file backend identity: plaintext file (Touch ID on unlock; run `av setup` without --plaintext to harden)")
+	default:
+		log.Printf("avd: file backend identity: Secure Enclave (hardened; Touch ID on unlock, lazy)")
+	}
+	sess.WithUnwrapper(tierUnwrapper(tier, encPath, idTxtPath, presence, unwrap, read))
+	reg.Register("file", agefile.New(sess, vaultPath))
+	srv.SetKeyTier(string(tier), tier == provision.TierEnclave)
 }
 
 // wireEnclaveBackend wires the HARDENED file backend WITHOUT unwrapping at startup. It
@@ -301,34 +409,40 @@ func mapEnclaveErr(err error) error {
 }
 
 // makeProvisioner returns the closure that serves the `setup` RPC: it provisions the
-// local age store (provision.Provision with the injected Wrap) and, on success, LIVE-
-// wires the file backend so a following `av add`/`av run` works with NO daemon restart.
-// It reuses the SAME wrap/unwrap seam and config default paths as registerBackends (DRY)
-// — no duplicated path logic.
+// local age store (provision.Provision with the injected Wrap + KeychainStore seams) and,
+// on success, LIVE-wires the file backend so a following `av add`/`av run` works with NO
+// daemon restart. It reuses the SAME wrap/unwrap + keystore seams and the per-tier
+// unwrapper builder as registerBackends (DRY) — no duplicated crypto or path logic.
 //
-// Live re-wiring (only when r.Created — a fresh provision or --rotate): for the wrapped
-// (default) store it sets the session unwrapper for the new identity.enc and registers
-// agefile.New(sess, vault); for a --plaintext store it eagerly loads identity.txt into a
-// Static source. Registry.Register overwrites by id, so re-running setup (e.g. --rotate)
-// cleanly replaces the "file" backend. An idempotent Created:false result skips the
-// re-wire: the backend is already wired (startup auto-discovery or a prior setup).
+// Tier selection from SetupParams: an explicit p.Tier wins; otherwise the legacy
+// p.Plaintext bool maps to Tier=plaintext (back-compat); otherwise "" = auto
+// (Enclave→keychain, never plaintext). p.RequireEnclave forbids the Enclave→keychain
+// downgrade. The injected Wrap (enclave) and KeychainStore (keychain) let provision pick
+// the best available tier — on this build's stub/real Wrap a failure auto-falls-back to
+// the keychain.
 //
-// SECURITY: only ipc.SetupParams/SetupResult cross this seam (booleans + on-disk paths);
-// no secret material is logged, returned, or embedded in an error.
-func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap func([]byte) ([]byte, error)) func(ipc.SetupParams) (ipc.SetupResult, error) {
+// Live re-wiring (only when r.Created — a fresh provision or --rotate): wireTier installs
+// the per-tier session unwrapper for r.Tier and registers agefile.New(sess, vault).
+// Registry.Register overwrites by id, so re-running setup (e.g. --rotate) cleanly replaces
+// the "file" backend and SetKeyTier updates the active tier. An idempotent Created:false
+// result skips the re-wire: the backend is already wired (startup auto-discovery or a
+// prior setup).
+//
+// SECURITY: only ipc.SetupParams/SetupResult cross this seam (booleans/tier name + on-disk
+// paths); no secret material is logged, returned, or embedded in an error.
+func makeProvisioner(reg *backend.Registry, sess *daemon.Session, srv *daemon.Server, wrap, unwrap func([]byte) ([]byte, error), store func([]byte) error, read func() ([]byte, error), presence daemon.Presence) func(ipc.SetupParams) (ipc.SetupResult, error) {
 	return func(p ipc.SetupParams) (ipc.SetupResult, error) {
-		// Tier selection: keep today's behavior — plaintext when the client asks for it,
-		// otherwise the enclave path with the injected Wrap. Task 3 wires KeychainStore and
-		// the keychain unwrapper; until then KeychainStore stays nil (so the keychain tier
-		// is unreachable here) and we never request it.
-		tier := provision.Tier("")
-		if p.Plaintext {
+		// Explicit tier wins; the legacy Plaintext bool is its back-compat alias; else auto.
+		tier := provision.Tier(p.Tier)
+		if tier == "" && p.Plaintext {
 			tier = provision.TierPlaintext
 		}
 		r, err := provision.Provision(provision.Options{
-			Rotate: p.Rotate,
-			Tier:   tier,
-			Wrap:   wrap, // Dir defaults to config.DefaultConfigDir() inside Provision
+			Rotate:         p.Rotate,
+			Tier:           tier,
+			RequireEnclave: p.RequireEnclave,
+			Wrap:           wrap,  // Dir defaults to config.DefaultConfigDir() inside Provision
+			KeychainStore:  store, // keychain sink for the keychain tier / Enclave downgrade
 		})
 		if err != nil {
 			return ipc.SetupResult{}, err
@@ -337,15 +451,10 @@ func makeProvisioner(reg *backend.Registry, sess *daemon.Session, wrap, unwrap f
 		// when this call actually created/rotated it (r.Created). On an idempotent
 		// Created:false result the backend is already wired — at startup (auto-discovery)
 		// or by a prior setup — so re-registering it would be redundant churn and the
-		// "file backend identity: ..." log line would be misleading. Skip it.
+		// "file backend identity: ..." log line would be misleading. Skip it. wireTier is
+		// the SAME helper startup discovery uses, so the unwrapper for r.Tier is identical.
 		if r.Created {
-			if r.Tier == provision.TierPlaintext {
-				if werr := wirePlaintextBackend(reg, r.IdentityPath, r.VaultPath); werr != nil {
-					return ipc.SetupResult{}, werr
-				}
-			} else {
-				wireEnclaveBackend(reg, sess, unwrap, r.IdentityPath, r.VaultPath)
-			}
+			wireTier(reg, sess, srv, r.Tier, r.VaultPath, unwrap, read, presence)
 		}
 		return ipc.SetupResult{VaultPath: r.VaultPath, IdentityPath: r.IdentityPath, Created: r.Created}, nil
 	}
@@ -369,6 +478,37 @@ func enclaveFuncs() (wrap, unwrap func([]byte) ([]byte, error)) {
 		return identity, identity
 	}
 	return enclave.Wrap, func(b []byte) ([]byte, error) { return enclave.Unwrap(b) }
+}
+
+// keystoreFuncs returns the keychain store/read pair the keychain tier persists and reads
+// the vault identity with. It is the SSOT used by BOTH startup discovery (registerBackends
+// → keychainHasIdentity / the keychain unwrapper) and the live `setup` provisioner
+// (makeProvisioner → provision.Options.KeychainStore), so the two never diverge —
+// mirroring enclaveFuncs.
+//
+// TEST SEAM (mirrors AV_TEST_ENCLAVE=stub / AV_TEST_AUTH=allow): when AV_TEST_KEYSTORE=<dir>
+// is set it returns FILE-backed stubs — store writes <dir>/identity (0600), read reads it
+// back (a missing file maps to backend.ErrNotFound so discovery sees "absent") — and logs
+// a LOUD warning. This lets CI/e2e exercise the keychain tier hermetically WITHOUT touching
+// the real login keychain. It is test-only and env-gated, the SAME risk profile as the
+// enclave stub: the identity is NOT keychain-protected under the stub, it is a plain 0600
+// file in the test dir. Otherwise it returns the real keystore.New() Store/Read.
+func keystoreFuncs() (store func([]byte) error, read func() ([]byte, error)) {
+	if dir := os.Getenv("AV_TEST_KEYSTORE"); dir != "" {
+		log.Printf("avd: using stub keystore (AV_TEST_KEYSTORE=%s) — identity NOT keychain-protected", dir)
+		path := filepath.Join(dir, "identity")
+		store = func(b []byte) error { return os.WriteFile(path, b, 0o600) }
+		read = func() ([]byte, error) {
+			b, err := os.ReadFile(path)
+			if os.IsNotExist(err) {
+				return nil, backend.ErrNotFound // absent → discovery sees "no keychain identity"
+			}
+			return b, err
+		}
+		return store, read
+	}
+	ks := keystore.New()
+	return ks.Store, ks.Read
 }
 
 // loadAgeIdentity reads an age identity file and returns its first identity.

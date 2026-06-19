@@ -84,6 +84,35 @@ type Server struct {
 	// live re-wire it triggers (registry Register + session unwrapper swap). Holding it
 	// around s.provision(p) makes provisioning + re-wire one critical section.
 	setupMu sync.Mutex
+	// keyTier records the ACTIVE identity-protection tier the file backend's unwrapper
+	// represents ("enclave"/"keychain"/"plaintext", or ""/"none" with no local vault).
+	// enclaveAvail reports whether the Secure Enclave is the active protection. Both are
+	// set via SetKeyTier whenever avd wires/re-wires a tier, so the future `version` RPC
+	// can announce the active tier. SECURITY: metadata only — never a secret. tierMu
+	// guards the pair because SetKeyTier (setup goroutine) and a future version RPC
+	// (another goroutine) can touch it concurrently.
+	tierMu       sync.Mutex
+	keyTier      string
+	enclaveAvail bool
+}
+
+// SetKeyTier records the active identity-protection tier (and whether the Secure Enclave
+// is the active protection) for the future `version` RPC. avd calls it whenever it
+// wires/re-wires a tier at startup or after a live `setup` — and with ""/"none" when no
+// local vault exists. SECURITY: it stores metadata only, never a secret.
+func (s *Server) SetKeyTier(tier string, enclaveAvailable bool) {
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
+	s.keyTier = tier
+	s.enclaveAvail = enclaveAvailable
+}
+
+// KeyTier reports the active identity-protection tier and Enclave availability recorded
+// by SetKeyTier. It is the read side the future `version` RPC consumes.
+func (s *Server) KeyTier() (tier string, enclaveAvailable bool) {
+	s.tierMu.Lock()
+	defer s.tierMu.Unlock()
+	return s.keyTier, s.enclaveAvail
 }
 
 // SetProvisioner injects the closure that serves the "setup" RPC. Call it after New and
