@@ -15,9 +15,26 @@ import (
 	"github.com/beshkenadze/agentvault/internal/backend"
 )
 
+// IdentitySource yields the age identity the file backend decrypts/encrypts with, or an
+// error (e.g. daemon.ErrLocked when the session is locked). The backend fetches it PER
+// operation rather than holding it, so the key can live in the daemon session — unwrapped
+// from the Secure Enclave on unlock and zeroized on lock — instead of sitting in the
+// backend for the daemon's whole lifetime. A nil identity with a non-nil error must
+// SURFACE that error (Resolve/Add/Remove), never be swallowed as "empty vault".
+type IdentitySource interface {
+	Identity() (age.Identity, error)
+}
+
+// Static wraps a fixed identity as an IdentitySource. It preserves the old held-identity
+// behavior for the plaintext / env path and for tests; Identity never errors.
+type Static struct{ ID age.Identity }
+
+// Identity returns the wrapped fixed identity (never an error).
+func (s Static) Identity() (age.Identity, error) { return s.ID, nil }
+
 // Backend decrypts an age file on each call and resolves a name -> value lookup.
 type Backend struct {
-	id   age.Identity
+	src  IdentitySource
 	path string
 	// wmu serializes Add/Remove. Each is a load→modify→write-then-rename sequence;
 	// without it, two concurrent writers each load a snapshot and rename their whole
@@ -26,9 +43,9 @@ type Backend struct {
 	wmu sync.Mutex
 }
 
-// New returns a backend that decrypts path with id.
-func New(id age.Identity, path string) *Backend {
-	return &Backend{id: id, path: path}
+// New returns a backend that decrypts path with the identity src yields per operation.
+func New(src IdentitySource, path string) *Backend {
+	return &Backend{src: src, path: path}
 }
 
 // EncryptVault age-encrypts a name -> value map to w for recipient. It is the inverse
@@ -50,12 +67,20 @@ func EncryptVault(w io.Writer, recipient age.Recipient, data map[string]string) 
 }
 
 func (b *Backend) load() (map[string]string, error) {
+	// Fetch the identity per operation; if the source is locked/errored, SURFACE the
+	// error so the caller can distinguish "can't decrypt right now" from "no such secret"
+	// (fail-closed, not fail-open). It is read before opening the file so a locked source
+	// fails fast without touching the vault on disk.
+	id, err := b.src.Identity()
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(b.path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	r, err := age.Decrypt(f, b.id)
+	r, err := age.Decrypt(f, id)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt %s: %w", b.path, err)
 	}
@@ -149,14 +174,20 @@ func (b *Backend) writeVault(data map[string]string) error {
 }
 
 // recipient derives the age recipient the vault must be (re-)encrypted to from the
-// injected identity. The file backend's identity is an *age.X25519Identity (both the
-// plaintext-file and the Secure-Enclave-unwrapped paths parse via age.ParseIdentities,
-// which yields X25519). A non-X25519 identity cannot yield an X25519 recipient, so we
-// error CLEARLY rather than silently writing a vault no reader can open.
+// source's identity. It fetches the identity per operation and SURFACES a source error
+// (e.g. locked session) before type-asserting. The file backend's identity is an
+// *age.X25519Identity (both the plaintext-file and the Secure-Enclave-unwrapped paths
+// parse via age.ParseIdentities, which yields X25519). A non-X25519 identity cannot yield
+// an X25519 recipient, so we error CLEARLY rather than silently writing a vault no reader
+// can open.
 func (b *Backend) recipient() (age.Recipient, error) {
-	x, ok := b.id.(*age.X25519Identity)
+	id, err := b.src.Identity()
+	if err != nil {
+		return nil, err
+	}
+	x, ok := id.(*age.X25519Identity)
 	if !ok {
-		return nil, fmt.Errorf("agefile: cannot derive recipient: identity is %T, not *age.X25519Identity", b.id)
+		return nil, fmt.Errorf("agefile: cannot derive recipient: identity is %T, not *age.X25519Identity", id)
 	}
 	return x.Recipient(), nil
 }

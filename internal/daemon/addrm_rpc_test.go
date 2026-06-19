@@ -50,7 +50,7 @@ func addrmServer(t *testing.T, vaultPath string, id age.Identity) (string, *bufL
 		t.Fatal(err)
 	}
 	reg := backend.NewRegistry()
-	reg.Register("file", agefile.New(id, vaultPath))
+	reg.Register("file", agefile.New(agefile.Static{ID: id}, vaultPath))
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz"}}) // read-only
 	log := &bufLogger{}
 	sess := NewSession(15 * time.Minute)
@@ -86,7 +86,7 @@ func rpcParams(t *testing.T, path, method string, params any) ipc.Response {
 // vault path/identity to confirm the value round-tripped through the encrypted file.
 func fileResolve(t *testing.T, vaultPath string, id age.Identity, name string) (string, error) {
 	t.Helper()
-	sec, err := agefile.New(id, vaultPath).Resolve(name)
+	sec, err := agefile.New(agefile.Static{ID: id}, vaultPath).Resolve(name)
 	return sec.Value, err
 }
 

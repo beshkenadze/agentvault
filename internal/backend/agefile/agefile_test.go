@@ -36,7 +36,7 @@ func TestResolveAndList(t *testing.T) {
 		"STRIPE_SECRET": "sk_live_value",
 	})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 
 	got, err := b.Resolve("GITHUB_TOKEN")
 	if err != nil {
@@ -67,7 +67,7 @@ func TestWrongIdentityFails(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"X": "y"})
 
-	b := New(other, path) // wrong identity
+	b := New(Static{ID: other}, path) // wrong identity
 	_, err := b.Resolve("X")
 	if err == nil {
 		t.Fatal("expected decryption failure with wrong identity")

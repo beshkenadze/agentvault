@@ -25,7 +25,7 @@ func TestAddResolvesBack(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"EXISTING": "old"})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Add("GITHUB_TOKEN", "ghp_new"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestConcurrentAddNoLostUpdate(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	const n = 50
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -87,7 +87,7 @@ func TestAddOverwrites(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"K": "v1"})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Add("K", "v2"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRemove(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"A": "1", "B": "2"})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Remove("A"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestAddIsAtomicNoTempLeftover(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"A": "1"})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Add("B", "2"); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestAddFailureLeavesOriginalIntact(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Add("B", "2"); err == nil {
 		t.Fatal("expected Add to fail when temp cannot be created")
 	}
@@ -196,7 +196,7 @@ func TestVaultMode0600(t *testing.T) {
 	path := filepath.Join(dir, "vault.age")
 	writeEncrypted(t, path, id, map[string]string{"A": "1"})
 
-	b := New(id, path)
+	b := New(Static{ID: id}, path)
 	if err := b.Add("B", "2"); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestAddNonX25519IdentityErrors(t *testing.T) {
 	realID, _ := age.GenerateX25519Identity()
 	writeEncrypted(t, path, realID, map[string]string{"A": "1"})
 
-	b := New(notX25519{realID}, path)
+	b := New(Static{ID: notX25519{realID}}, path)
 	err := b.Add("B", "2")
 	if err == nil {
 		t.Fatal("expected Add to error for a non-X25519 identity")

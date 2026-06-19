@@ -34,7 +34,7 @@ func TestResolveThroughRegistry(t *testing.T) {
 	writeVault(t, path, id, map[string]string{"GITHUB_TOKEN": "ghp_xyz"})
 
 	reg := backend.NewRegistry()
-	reg.Register("file", agefile.New(id, path))
+	reg.Register("file", agefile.New(agefile.Static{ID: id}, path))
 
 	got, err := reg.Resolve("av://file/GITHUB_TOKEN")
 	if err != nil {

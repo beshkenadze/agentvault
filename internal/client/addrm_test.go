@@ -40,7 +40,7 @@ func addrmDaemon(t *testing.T, seed map[string]string) (*Client, string, *age.X2
 		t.Fatal(err)
 	}
 	reg := backend.NewRegistry()
-	reg.Register("file", agefile.New(id, vault))
+	reg.Register("file", agefile.New(agefile.Static{ID: id}, vault))
 	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), daemon.NewSession(15*time.Minute)))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
@@ -56,7 +56,7 @@ func TestClientAddRoundTrips(t *testing.T) {
 	if err := cl.Add("file", "TOKEN", []byte(secret)); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	sec, err := agefile.New(id, vault).Resolve("TOKEN")
+	sec, err := agefile.New(agefile.Static{ID: id}, vault).Resolve("TOKEN")
 	if err != nil {
 		t.Fatalf("resolve after Add: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestClientRemove(t *testing.T) {
 	if err := cl.Remove("file", "GONE"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := agefile.New(id, vault).Resolve("GONE"); err != backend.ErrNotFound {
+	if _, err := agefile.New(agefile.Static{ID: id}, vault).Resolve("GONE"); err != backend.ErrNotFound {
 		t.Fatalf("resolve removed = %v, want ErrNotFound", err)
 	}
 }

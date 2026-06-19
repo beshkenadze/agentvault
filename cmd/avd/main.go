@@ -166,7 +166,11 @@ func registerBackends(reg *backend.Registry) {
 			// The error carries only a path/reason or an OSStatus, never key material.
 			log.Printf("avd: file backend disabled: %v", err)
 		} else {
-			reg.Register("file", agefile.New(id, vaultPath))
+			// Wrap the (plaintext or Enclave-unwrapped) identity in a Static source for
+			// now — the backend fetches it per operation via the IdentitySource seam.
+			// Task 6 replaces the Enclave path's Static with the daemon session, so the
+			// key lives in the session (zeroized on lock) rather than held here.
+			reg.Register("file", agefile.New(agefile.Static{ID: id}, vaultPath))
 			registered = append(registered, "file")
 		}
 	}
