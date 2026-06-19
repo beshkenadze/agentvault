@@ -112,7 +112,7 @@ func runRun(args []string) {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		os.Exit(exitGeneric)
 	}
-	code, err := client.Run(client.New(path).WithNoPrompt(noPrompt()), client.RunOptions{
+	code, err := client.Run(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.RunOptions{
 		Profile: profile,
 		Command: cmdArgs,
 	}, os.Stdout, os.Stderr)
@@ -145,7 +145,7 @@ func runRead(args []string) {
 		os.Exit(exitGeneric)
 	}
 
-	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()), client.ReadOptions{
+	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.ReadOptions{
 		Profile: profile,
 		Name:    name,
 	}, os.Stdout, stdoutIsTTY())
@@ -283,7 +283,7 @@ func dialClient() *client.Client {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		os.Exit(exitGeneric)
 	}
-	return client.New(path).WithNoPrompt(noPrompt())
+	return client.New(path).WithNoPrompt(noPrompt()).WithVersion(version)
 }
 
 // noPrompt reports the AV_NO_PROMPT agent opt-out: any non-empty value is truthy (agents
@@ -293,9 +293,15 @@ func dialClient() *client.Client {
 func noPrompt() bool { return os.Getenv("AV_NO_PROMPT") != "" }
 
 // exitForError maps a client error to an exit code, printing a clear, secret-free
-// message to stderr. A *ipc.RPCError (from resolve) is mapped by its stable Code;
-// anything else is a generic failure.
+// message to stderr. A *ipc.RPCError (from resolve) is mapped by its stable Code; a
+// *client.ErrDaemonOutdated (an agent hit a stale daemon it must not auto-restart) prints
+// its "ask a human" message; anything else is a generic failure.
 func exitForError(err error) int {
+	var outdated *client.ErrDaemonOutdated
+	if errors.As(err, &outdated) {
+		fmt.Fprintln(os.Stderr, "av:", outdated.Error())
+		return exitGeneric
+	}
 	var rpc *ipc.RPCError
 	if errors.As(err, &rpc) {
 		switch rpc.Code {

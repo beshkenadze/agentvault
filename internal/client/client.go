@@ -5,20 +5,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
 
+// defaultHealWait bounds the post-Shutdown poll for the upgraded daemon to come up. It
+// is a field (healWait) so tests can shrink it; see withHealWait.
+const defaultHealWait = 5 * time.Second
+
 // Client is a thin RPC client bound to a daemon socket path.
 //
 // noPrompt is the agent opt-out from on-demand biometric unlock: when set (cmd/av maps
 // AV_NO_PROMPT to it) the Resolve/Add/Remove RPCs carry NoPrompt so a locked daemon
 // session returns CodeLocked (exit 69) instead of blocking the agent on a Touch ID.
+//
+// version is av's own build version (cmd/av's ldflags-injected tag, threaded via
+// WithVersion). ensureFresh compares it to the daemon's version to self-heal a stale
+// daemon after a brew upgrade (see ensureFresh); healed guards that heal to AT MOST once.
 type Client struct {
 	path     string
 	noPrompt bool
+	version  string
+	healed   bool          // heal is attempted at most once per client (win or lose)
+	healWait time.Duration // bound on the post-Shutdown poll (0 means defaultHealWait)
+}
+
+// ErrDaemonOutdated reports a version skew the client refused to auto-heal: an agent run
+// (NoPrompt) must never restart the user's daemon, so ensureFresh returns this for cmd/av
+// to print and exit non-zero — a human then restarts the daemon. Av/Avd are the versions.
+type ErrDaemonOutdated struct{ Av, Avd string }
+
+func (e *ErrDaemonOutdated) Error() string {
+	return fmt.Sprintf("avd outdated (%s) vs av (%s) — ask a human: brew services restart agentvault", e.Avd, e.Av)
 }
 
 // New returns a Client for the daemon socket at path.
@@ -30,6 +51,71 @@ func New(path string) *Client { return &Client{path: path} }
 func (c *Client) WithNoPrompt(noPrompt bool) *Client {
 	c.noPrompt = noPrompt
 	return c
+}
+
+// WithVersion records av's own build version so ensureFresh can detect a stale daemon and
+// self-heal it. It returns the client for one-line construction (chainable with
+// WithNoPrompt). An empty/"dev" version never heals (see ensureFresh).
+func (c *Client) WithVersion(v string) *Client {
+	c.version = v
+	return c
+}
+
+// withHealWait shrinks the post-Shutdown poll bound so tests need not wait the full
+// defaultHealWait. It is unexported (test-only) and chainable like the With* setters.
+func (c *Client) withHealWait(d time.Duration) *Client {
+	c.healWait = d
+	return c
+}
+
+// ensureFresh self-heals a daemon left stale by a brew upgrade: when av's version differs
+// from the running avd's (neither being the "dev"/unstamped sentinel), it either surfaces
+// ErrDaemonOutdated (agents — NoPrompt) or restarts the old daemon (humans) so the freshly
+// installed binary takes over. It heals AT MOST once per client (the healed guard wins-or-
+// loses) and NEVER hangs: the human path polls only up to healWait, then warns and proceeds.
+//
+// It returns nil (no-op) when there is nothing safe to heal: an unstamped/dev av (we must
+// never restart a release daemon from a dev build), an unreachable daemon (the normal
+// dial/autostart brings up the right binary), or a matched/dev daemon (no skew). Work
+// methods call it first; Version/Shutdown/Ping do NOT (avoiding recursion).
+func (c *Client) ensureFresh() error {
+	if c.healed || c.version == "" || c.version == "dev" {
+		return nil // never heal from a dev/unstamped av, and never more than once
+	}
+	v, err := c.Version()
+	if err != nil {
+		return nil // daemon unreachable — the dial/autostart path will bring up the right one
+	}
+	c.healed = true // heal is attempted at most once, win or lose — prevents loops
+	if v.Version == "dev" || v.Version == c.version {
+		return nil // no skew, or a dev daemon (mixed dev/brew setup must not loop)
+	}
+
+	// SKEW: av and avd are different stamped releases (the brew-upgrade case).
+	if c.noPrompt {
+		// Agents never auto-restart the user's daemon — surface a clear error to pause.
+		return &ErrDaemonOutdated{Av: c.version, Avd: v.Version}
+	}
+
+	fmt.Fprintf(os.Stderr, "agentvault: daemon upgraded (%s -> %s) — restarting\n", v.Version, c.version)
+	_ = c.Shutdown() // the connection dropping as the old daemon exits IS success — ignore the error
+
+	// Poll (bounded by healWait) for the upgraded binary: the next Version() that returns
+	// our version means the new daemon is up (re-dial uses the existing autostart/retry).
+	wait := c.healWait
+	if wait <= 0 {
+		wait = defaultHealWait
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(150 * time.Millisecond)
+		if nv, nerr := c.Version(); nerr == nil && nv.Version == c.version {
+			return nil // the new binary is up and matched — caller proceeds
+		}
+	}
+	// Still skewed/unreachable after the bound: NEVER hang — warn loudly and proceed anyway.
+	fmt.Fprintf(os.Stderr, "WARNING: daemon still %s after restart attempt; run: brew services restart agentvault\n", v.Version)
+	return nil
 }
 
 // dial opens one connection to the daemon, autostarting avd (detached) and
@@ -94,6 +180,9 @@ func dialRetry(path string, total time.Duration) (net.Conn, error) {
 // the logical name -> value map. On a daemon error it returns resp.Error (a
 // *ipc.RPCError) so the caller can inspect its Code (e.g. CodeLocked/CodeDenied).
 func (c *Client) Resolve(profile string, manifestBytes []byte) (map[string]string, error) {
+	if err := c.ensureFresh(); err != nil {
+		return nil, err // *ErrDaemonOutdated (agents) — cmd/av prints "ask a human" and exits
+	}
 	p, _ := json.Marshal(ipc.ResolveParams{Profile: profile, Manifest: manifestBytes, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "resolve", Params: p})
 	if err != nil {
@@ -114,6 +203,9 @@ func (c *Client) Resolve(profile string, manifestBytes []byte) (map[string]strin
 // map its Code (CodeLocked/CodeDenied) to an exit code. The StatusResult reply is
 // not needed by the caller (av status reports remaining), so only the error matters.
 func (c *Client) Unlock() error {
+	if err := c.ensureFresh(); err != nil {
+		return err
+	}
 	resp, err := c.call(ipc.Request{ID: 1, Method: "unlock"})
 	if err != nil {
 		return err
@@ -126,6 +218,9 @@ func (c *Client) Unlock() error {
 
 // Lock issues the "lock" RPC, re-locking the session and clearing issued values.
 func (c *Client) Lock() error {
+	if err := c.ensureFresh(); err != nil {
+		return err
+	}
 	resp, err := c.call(ipc.Request{ID: 1, Method: "lock"})
 	if err != nil {
 		return err
@@ -165,6 +260,9 @@ func (c *Client) Shutdown() error {
 // Status issues the "status" RPC and returns the session lock state and remaining
 // unlock seconds. The reply NEVER carries a value (StatusResult has no value field).
 func (c *Client) Status() (locked bool, remaining int, err error) {
+	if err := c.ensureFresh(); err != nil {
+		return false, 0, err
+	}
 	resp, err := c.call(ipc.Request{ID: 1, Method: "status"})
 	if err != nil {
 		return false, 0, err
@@ -185,6 +283,9 @@ func (c *Client) Status() (locked bool, remaining int, err error) {
 // history / ps. On a daemon error it returns resp.Error (a *ipc.RPCError) so the caller
 // can map its Code (e.g. CodeBadRequest for a read-only backend) to an exit code.
 func (c *Client) Add(backend, locator string, value []byte) error {
+	if err := c.ensureFresh(); err != nil {
+		return err
+	}
 	p, _ := json.Marshal(ipc.AddParams{Backend: backend, Locator: locator, Value: value, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "add", Params: p})
 	if err != nil {
@@ -200,6 +301,9 @@ func (c *Client) Add(backend, locator string, value []byte) error {
 // carries no value (removal is by name only). A missing name surfaces as resp.Error
 // with CodeBadRequest so the caller can report it clearly.
 func (c *Client) Remove(backend, locator string) error {
+	if err := c.ensureFresh(); err != nil {
+		return err
+	}
 	p, _ := json.Marshal(ipc.RmParams{Backend: backend, Locator: locator, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "rm", Params: p})
 	if err != nil {
