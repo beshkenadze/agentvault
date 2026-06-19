@@ -313,14 +313,32 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		res, _ := json.Marshal(ipc.ResolveResult{Values: vals})
 		return ipc.Response{ID: req.ID, Result: res}
 	case "unlock":
-		// The call that fires Touch ID in production: one presence Prompt opens the
-		// session for DefaultTTL. A denied presence maps to CodeDenied; no presence
-		// available (ErrLocked) maps to CodeLocked.
-		if s.presence == nil {
-			return errResp(req.ID, ipc.CodeInternal, "presence not configured")
-		}
+		// The call that fires Touch ID in production: one presence proof opens the
+		// session for DefaultTTL. A denied proof maps to CodeDenied; no proof available
+		// (ErrLocked) maps to CodeLocked.
 		if s.session == nil {
 			return errResp(req.ID, ipc.CodeInternal, "session not configured")
+		}
+		if s.session.HasUnwrapper() {
+			// WHY: with an Enclave-wrapped vault identity the unwrap (a single Touch ID
+			// via the Secure Enclave) IS the presence proof — so we DON'T also call
+			// s.presence.Prompt here, otherwise the user would face two prompts for one
+			// unlock. A failed/denied unwrap leaves the session locked (Task 3 ordering).
+			// Dangerous-tier resolve still uses s.presence for fresh per-access prompts —
+			// the resolver is untouched; only this unlock branch swaps to unwrap.
+			if err := s.session.unlockWithUnwrapper(DefaultTTL); err != nil {
+				code := ipc.CodeLocked
+				if errors.Is(err, ErrDenied) {
+					code = ipc.CodeDenied
+				}
+				return errResp(req.ID, code, err.Error())
+			}
+			s.audit.Log(audit.Event{Kind: "unlock"})
+			return statusResponse(req.ID, s.session)
+		}
+		// No wrapped identity: the existing plain presence-prompt unlock.
+		if s.presence == nil {
+			return errResp(req.ID, ipc.CodeInternal, "presence not configured")
 		}
 		if err := s.presence.Prompt("Unlock AgentVault"); err != nil {
 			code := ipc.CodeLocked
