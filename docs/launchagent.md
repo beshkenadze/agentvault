@@ -5,6 +5,10 @@ only be presented from a process running in the user's **Aqua/GUI session**.
 Therefore `avd` must run as a **per-user LaunchAgent**, never as a system
 `LaunchDaemon` (a LaunchDaemon has no GUI session and the prompt silently fails).
 
+> **Note:** With the Homebrew install, `brew services start agentvault` runs `avd`
+> as the per-user LaunchAgent for you. The manual steps below are for building from
+> source or verifying the Touch ID path by hand.
+
 > **Status:** Phase 5 ships the plist template and these steps. `av init`
 > (Phase 6) will generate and install this for you. The steps below are the
 > **manual verification path** for the Touch ID work in Phase 5 — a green `go build`
