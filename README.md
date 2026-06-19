@@ -83,6 +83,9 @@ available, never silently downgrading to plaintext:
 - **auto** (default): try the Secure Enclave; on any failure (e.g. an unsigned binary)
   fall back to the **keychain** with a loud warning. Plaintext is **never** chosen
   automatically.
+- `--keychain` / `--enclave`: force a tier.
+- `--require-enclave`: force the Enclave and **error** instead of downgrading (for a
+  signed deployment that must not fall back).
 - `--plaintext`: force the plaintext tier (the explicit escape hatch).
 
 The plain `brew install` builds from source as an ad-hoc-signed binary, which the
@@ -149,7 +152,7 @@ av run [--profile P] -- cmd args...     run cmd with secrets injected, output ma
 av read [--profile P] NAME              print one secret — to a TTY only (refuses a pipe)
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
-av setup [--rotate] [--plaintext]       provision the local age vault (auto-picks the tier)
+av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the local age vault (auto-picks the tier)
 av init --agent claude-code|generic [--dir D] [--force]   generate adapter files
 av unlock                               Touch ID — open the session (optional; ops auto-unlock)
 av lock                                 re-lock and clear issued values

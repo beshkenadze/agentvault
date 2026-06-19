@@ -29,6 +29,35 @@ func TestParseSetupArgsFlags(t *testing.T) {
 	}
 }
 
+// TestParseSetupArgsTierFlags: --keychain/--enclave set Tier; --require-enclave sets
+// Tier=enclave AND RequireEnclave (forbid downgrade).
+func TestParseSetupArgsTierFlags(t *testing.T) {
+	for _, tc := range []struct {
+		flag        string
+		wantTier    string
+		wantRequire bool
+	}{
+		{"--keychain", "keychain", false},
+		{"--enclave", "enclave", false},
+		{"--require-enclave", "enclave", true},
+	} {
+		p, err := parseSetupArgs([]string{tc.flag})
+		if err != nil || p.Tier != tc.wantTier || p.RequireEnclave != tc.wantRequire {
+			t.Fatalf("%s: tier=%q require=%v err=%v; want tier=%q require=%v",
+				tc.flag, p.Tier, p.RequireEnclave, err, tc.wantTier, tc.wantRequire)
+		}
+	}
+}
+
+// TestParseSetupArgsConflict: a tier flag and --plaintext together are a usage error
+// (intent must not be guessed).
+func TestParseSetupArgsConflict(t *testing.T) {
+	if _, err := parseSetupArgs([]string{"--plaintext", "--keychain"}); err == nil ||
+		!strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("err = %v, want a conflicting-tier-flags error", err)
+	}
+}
+
 // TestParseSetupArgsRejectsUnexpected: any non-flag argument is a usage error (setup
 // takes no values/positionals).
 func TestParseSetupArgsRejectsUnexpected(t *testing.T) {

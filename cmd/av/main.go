@@ -77,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--plaintext]  (provision the local age vault)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -486,11 +486,11 @@ func runAdd(args []string) {
 	fmt.Printf("added %s\n", name)
 }
 
-// runSetup implements `av setup [--rotate] [--plaintext]`. It is a PURE RPC: it asks
-// the daemon (which links age+enclave) to provision the local age store and prints the
-// resulting on-disk PATHS only — never a secret. --rotate forces a fresh identity/vault;
-// --plaintext writes the identity unwrapped (the escape hatch for hosts without a Secure
-// Enclave). av stays thin: no age/enclave/provision import lives here.
+// runSetup implements `av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]`.
+// It is a PURE RPC: it asks the daemon (which links age+enclave) to provision the local
+// age store and prints the resulting PATHS only — never a secret. With no tier flag the
+// daemon auto-picks the strongest available (Enclave→keychain). --rotate forces a fresh
+// identity/vault. av stays thin: no age/enclave/provision import lives here.
 func runSetup(args []string) {
 	p, err := parseSetupArgs(args)
 	if err != nil {
@@ -509,8 +509,12 @@ func runSetup(args []string) {
 	fmt.Printf("already provisioned: %s\n", res.VaultPath)
 }
 
-// parseSetupArgs extracts the --rotate and --plaintext bool flags from `av setup` args.
-// They take no value (only the `--flag` form); any other argument is a usage error.
+// parseSetupArgs extracts the `av setup` flags (no values; only the `--flag` form).
+// Tier selection: with no tier flag the daemon auto-picks the best available
+// (Enclave→keychain, never plaintext). --keychain / --enclave force a tier;
+// --require-enclave forces Enclave and ERRORS instead of downgrading; --plaintext is
+// the explicit weakest opt-out. Conflicting tier flags are a usage error. av stays thin:
+// this only sets RPC params — the daemon owns the crypto and the selection logic.
 func parseSetupArgs(args []string) (ipc.SetupParams, error) {
 	var p ipc.SetupParams
 	for _, a := range args {
@@ -519,9 +523,21 @@ func parseSetupArgs(args []string) (ipc.SetupParams, error) {
 			p.Rotate = true
 		case "--plaintext":
 			p.Plaintext = true
+		case "--keychain":
+			p.Tier = "keychain"
+		case "--enclave":
+			p.Tier = "enclave"
+		case "--require-enclave":
+			p.Tier = "enclave"
+			p.RequireEnclave = true
 		default:
 			return p, fmt.Errorf("unexpected argument %q", a)
 		}
+	}
+	// A tier flag and --plaintext are mutually exclusive: refuse rather than silently
+	// letting one win, so the user's intent is never guessed.
+	if p.Plaintext && p.Tier != "" {
+		return p, fmt.Errorf("conflicting tier flags: --plaintext with --%s", p.Tier)
 	}
 	return p, nil
 }
