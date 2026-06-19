@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"strings"
 	"sync"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/beshkenadze/agentvault/internal/redact"
 )
@@ -27,15 +30,27 @@ import (
 // protecting every transient copy is out of scope because the masker fundamentally
 // needs cleartext to match. memguard here protects the at-rest session values, not the
 // matcher's transient working set.
+//
+// Phase 7 (Enclave-coupled vault key): the session can also hold the UNWRAPPED age
+// identity that the file backend decrypts/encrypts the vault with. The unwrapper is the
+// Secure-Enclave Unwrap (a Touch ID), so a single unlock prompt covers BOTH opening the
+// session AND unwrapping the key — unwrap IS the presence proof. The identity lives as
+// RAW BYTES in a lockedValue (mlock + zeroize), parsed to an age.Identity ON DEMAND, so
+// the vault key gets the SAME at-rest protection as issued values. It is overwritten
+// (not merely dropped) on every lock path via destroyIssuedLocked, so a daemon
+// compromise AFTER lock cannot decrypt the vault: the key only exists in memory inside
+// the unlocked window.
 type Session struct {
 	ttl time.Duration
 	now func() time.Time
 
-	mu       sync.Mutex
-	unlocked bool // fresh sessions are locked until Unlock
-	deadline time.Time
-	issued   map[string]*lockedValue // logical name -> protected value (mlock + zeroize)
-	det      redact.Detector         // optional gitleaks detector for layer 2
+	mu        sync.Mutex
+	unlocked  bool // fresh sessions are locked until Unlock
+	deadline  time.Time
+	issued    map[string]*lockedValue // logical name -> protected value (mlock + zeroize)
+	det       redact.Detector         // optional gitleaks detector for layer 2
+	unwrapper func() ([]byte, error)  // optional Enclave Unwrap (Touch ID) yielding raw identity bytes
+	identity  *lockedValue            // unwrapped age identity bytes (mlock + zeroize); nil while locked
 }
 
 // NewSession returns a LOCKED session with the given default TTL. The session must be
@@ -52,14 +67,42 @@ func (s *Session) WithDetector(d redact.Detector) *Session {
 	return s
 }
 
+// WithUnwrapper sets the Secure-Enclave Unwrap (a Touch ID) that yields the raw age
+// identity bytes on unlock. Wiring an unwrapper makes unlock UNWRAP the vault key as its
+// presence proof (see unlockWithUnwrapper); leaving it unset keeps the plain
+// presence-prompt unlock. Mirrors WithDetector's lock + return-self style.
+func (s *Session) WithUnwrapper(f func() ([]byte, error)) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unwrapper = f
+	return s
+}
+
+// HasUnwrapper reports whether an Enclave unwrapper is wired, so the server can choose
+// the unwrap-as-presence unlock path over the plain presence prompt.
+func (s *Session) HasUnwrapper() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unwrapper != nil
+}
+
 // destroyIssuedLocked zeroizes (and munlocks) every protected buffer, then resets the
 // map. SSOT for every clear path (Unlock / Issue-into-closed / Lock): a value is never
 // merely dropped, it is overwritten. Caller must hold s.mu.
+//
+// The unwrapped vault identity is cleared here too, so it rides the SAME SSOT as issued
+// values: Lock, the Unlock stale-clear, and Issue-into-closed all ZEROIZE the key — it
+// is overwritten, never merely dropped — so a daemon compromise after lock cannot
+// decrypt the vault. (unlockWithUnwrapper repopulates it right after Unlock's clear.)
 func (s *Session) destroyIssuedLocked() {
 	for _, lv := range s.issued {
 		lv.Destroy()
 	}
 	s.issued = map[string]*lockedValue{}
+	if s.identity != nil {
+		s.identity.Destroy()
+		s.identity = nil
+	}
 }
 
 // Unlock opens the session for the given TTL: it marks the session unlocked, sets the
@@ -175,9 +218,68 @@ func (s *Session) Detector() redact.Detector {
 // Lock re-locks the session and ZEROIZES + clears all issued values (used by av lock /
 // TTL expiry / Phase 5 auto-lock / rate-limit force-relock). Each protected buffer is
 // overwritten with zeros and munlocked — the secret is destroyed, not merely dropped.
+// destroyIssuedLocked also zeroizes the unwrapped vault identity on this path.
 func (s *Session) Lock() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.unlocked = false
 	s.destroyIssuedLocked()
+}
+
+// Identity parses and returns the unwrapped age identity the file backend decrypts and
+// encrypts the vault with. Structurally this satisfies agefile.IdentitySource (fetched
+// per operation), so the key can live HERE and be zeroized on lock rather than held by
+// the backend — we intentionally do NOT import agefile to keep the dependency one-way.
+//
+// It returns ErrLocked when the session is closed or holds no key, so a locked session
+// cannot decrypt the vault. The identity is held as RAW BYTES and parsed ON DEMAND (not
+// cached as a parsed age.Identity) so the key material gets the same mlock+zeroize
+// at-rest protection as issued values; the parsed form is transient working memory.
+func (s *Session) Identity() (age.Identity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lockedLocked() || s.identity == nil {
+		return nil, ErrLocked
+	}
+	ids, err := age.ParseIdentities(strings.NewReader(s.identity.String()))
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, ErrLocked
+	}
+	return ids[0], nil
+}
+
+// setIdentityLocked stores the unwrapped identity bytes in a fresh protected buffer
+// (mlock + zeroize), destroying any prior buffer first so a replaced key is overwritten,
+// never leaked. Caller must hold s.mu.
+func (s *Session) setIdentityLocked(b []byte) {
+	if s.identity != nil {
+		s.identity.Destroy()
+	}
+	s.identity = newLockedValue(string(b))
+}
+
+// unlockWithUnwrapper opens the session by UNWRAPPING the vault key — the unwrap (a
+// Touch ID via the Secure Enclave) IS the presence proof, so one biometric covers both
+// session-open and key material. The unwrap runs FIRST: if it errors (e.g. the user
+// denied the prompt), the session stays LOCKED and we surface the error unchanged, so a
+// denied unwrap is a denied unlock.
+//
+// Locking discipline: Unlock takes s.mu itself, so we must not hold s.mu across it. We
+// fetch the bytes with no lock held, call Unlock (whose destroyIssuedLocked nils any
+// stale identity), then take s.mu only to store the new identity. That ordering is
+// deliberate — Unlock clears, then we populate — so the freshly-unwrapped key lands in a
+// clean session.
+func (s *Session) unlockWithUnwrapper(ttl time.Duration) error {
+	b, err := s.unwrapper()
+	if err != nil {
+		return err
+	}
+	s.Unlock(ttl)
+	s.mu.Lock()
+	s.setIdentityLocked(b)
+	s.mu.Unlock()
+	return nil
 }
