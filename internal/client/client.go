@@ -12,10 +12,25 @@ import (
 )
 
 // Client is a thin RPC client bound to a daemon socket path.
-type Client struct{ path string }
+//
+// noPrompt is the agent opt-out from on-demand biometric unlock: when set (cmd/av maps
+// AV_NO_PROMPT to it) the Resolve/Add/Remove RPCs carry NoPrompt so a locked daemon
+// session returns CodeLocked (exit 69) instead of blocking the agent on a Touch ID.
+type Client struct {
+	path     string
+	noPrompt bool
+}
 
 // New returns a Client for the daemon socket at path.
 func New(path string) *Client { return &Client{path: path} }
+
+// WithNoPrompt sets the agent opt-out (AV_NO_PROMPT) on the client so Resolve/Add/Remove
+// carry NoPrompt — a locked session then returns CodeLocked rather than firing Touch ID.
+// It returns the client for one-line construction (client.New(p).WithNoPrompt(b)).
+func (c *Client) WithNoPrompt(noPrompt bool) *Client {
+	c.noPrompt = noPrompt
+	return c
+}
 
 // dial opens one connection to the daemon, autostarting avd (detached) and
 // retrying if no daemon is listening yet. Callers own the returned conn and must
@@ -79,7 +94,7 @@ func dialRetry(path string, total time.Duration) (net.Conn, error) {
 // the logical name -> value map. On a daemon error it returns resp.Error (a
 // *ipc.RPCError) so the caller can inspect its Code (e.g. CodeLocked/CodeDenied).
 func (c *Client) Resolve(profile string, manifestBytes []byte) (map[string]string, error) {
-	p, _ := json.Marshal(ipc.ResolveParams{Profile: profile, Manifest: manifestBytes})
+	p, _ := json.Marshal(ipc.ResolveParams{Profile: profile, Manifest: manifestBytes, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "resolve", Params: p})
 	if err != nil {
 		return nil, err
@@ -144,7 +159,7 @@ func (c *Client) Status() (locked bool, remaining int, err error) {
 // history / ps. On a daemon error it returns resp.Error (a *ipc.RPCError) so the caller
 // can map its Code (e.g. CodeBadRequest for a read-only backend) to an exit code.
 func (c *Client) Add(backend, locator string, value []byte) error {
-	p, _ := json.Marshal(ipc.AddParams{Backend: backend, Locator: locator, Value: value})
+	p, _ := json.Marshal(ipc.AddParams{Backend: backend, Locator: locator, Value: value, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "add", Params: p})
 	if err != nil {
 		return err
@@ -159,7 +174,7 @@ func (c *Client) Add(backend, locator string, value []byte) error {
 // carries no value (removal is by name only). A missing name surfaces as resp.Error
 // with CodeBadRequest so the caller can report it clearly.
 func (c *Client) Remove(backend, locator string) error {
-	p, _ := json.Marshal(ipc.RmParams{Backend: backend, Locator: locator})
+	p, _ := json.Marshal(ipc.RmParams{Backend: backend, Locator: locator, NoPrompt: c.noPrompt})
 	resp, err := c.call(ipc.Request{ID: 1, Method: "rm", Params: p})
 	if err != nil {
 		return err

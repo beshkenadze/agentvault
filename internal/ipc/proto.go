@@ -41,9 +41,15 @@ const (
 
 // ResolveParams is the client request for `resolve`. The thin av sends the raw
 // agentvault.yaml bytes; avd parses them (av links neither yaml nor backends).
+//
+// NoPrompt is the agent opt-out from on-demand biometric unlock: when false (a
+// human at a TTY) a locked session is opened with one Touch ID before resolving;
+// when true (set from AV_NO_PROMPT) a locked session returns CodeLocked instead, so
+// the agent gets the clean exit-69 pause rather than blocking on a biometric prompt.
 type ResolveParams struct {
 	Profile  string `json:"profile"`
 	Manifest []byte `json:"manifest"` // raw agentvault.yaml bytes
+	NoPrompt bool   `json:"no_prompt,omitempty"`
 }
 
 // ResolveResult is the daemon reply: logical name -> secret value. This is the
@@ -62,6 +68,9 @@ type AddParams struct {
 	Backend string `json:"backend"`
 	Locator string `json:"locator"`
 	Value   []byte `json:"value"`
+	// NoPrompt mirrors ResolveParams.NoPrompt: false auto-unlocks a locked session
+	// with one Touch ID before the write; true (agents) returns CodeLocked instead.
+	NoPrompt bool `json:"no_prompt,omitempty"`
 }
 
 // RmParams is the client request for `rm`: delete a secret from a writable backend's
@@ -69,6 +78,9 @@ type AddParams struct {
 type RmParams struct {
 	Backend string `json:"backend"`
 	Locator string `json:"locator"`
+	// NoPrompt mirrors ResolveParams.NoPrompt: false auto-unlocks a locked session
+	// with one Touch ID before the delete; true (agents) returns CodeLocked instead.
+	NoPrompt bool `json:"no_prompt,omitempty"`
 }
 
 // ScrubParams is one chunk of a streamed scrub request. The client loops sending

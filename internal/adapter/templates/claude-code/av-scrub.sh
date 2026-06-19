@@ -8,4 +8,9 @@
 #
 # Wire this on EVERY context-ingress channel (see .claude/agentvault.hooks.json and
 # .claude/skills/agentvault/SKILL.md). A channel left unhooked is a hole.
+#
+# AV_NO_PROMPT=1 marks this as the AGENT path: a locked vault returns exit 69 (pause for
+# a human to unlock) instead of blocking the agent on an on-demand Touch ID. Export it so
+# every `av` call the agent makes (av run / av read / av add) inherits the opt-out.
+export AV_NO_PROMPT=1
 exec av scrub

@@ -148,6 +148,50 @@ func (s *Server) SetResolver(r *Resolver) {
 	}
 }
 
+// ensureUnlocked opens a locked session ON DEMAND before resolve/add/rm touch the vault.
+// If the session is already unlocked it is a no-op. Otherwise, when noPrompt is false (a
+// human at a TTY) and an unwrapper is wired, it unwraps the vault key with one Touch ID
+// (unlockWithUnwrapper) — so the user never has to run `av unlock` first. When noPrompt is
+// true (agents, via AV_NO_PROMPT) it returns ErrLocked WITHOUT prompting, so the agent
+// gets the clean ErrLocked->exit-69 pause instead of blocking on a biometric. With no
+// unwrapper it likewise returns ErrLocked (the plain `av unlock` flow is unchanged).
+//
+// WHY gate resolve/add/rm on it: this makes the session open on demand with ONE Touch ID
+// for the interactive path, while NoPrompt keeps the agent path non-blocking (the clean
+// ErrLocked->exit-69 pause). resolve calls it first; add/rm call it after the writable-
+// backend lookup, so a routing fault (no vault / read-only backend) still surfaces its
+// precise hint before the write's unlock gate. Dangerous-tier fresh-presence inside the
+// resolver is untouched: this only opens the SESSION; per-secret dangerous prompts still
+// fire in Resolve.
+func (s *Server) ensureUnlocked(noPrompt bool) error {
+	if s.session == nil {
+		return ErrLocked
+	}
+	if !s.session.Locked() {
+		return nil
+	}
+	if !noPrompt && s.session.HasUnwrapper() {
+		return s.session.unlockWithUnwrapper(DefaultTTL) // one Touch ID opens the session
+	}
+	return ErrLocked
+}
+
+// ensureUnlockedResp runs ensureUnlocked and, on failure, maps the error to a ready-to-send
+// error Response (ErrLocked->CodeLocked, ErrDenied->CodeDenied, like the resolve path) so
+// the three handlers gate uniformly. It returns nil when the session is (now) open.
+func (s *Server) ensureUnlockedResp(id uint64, noPrompt bool) *ipc.Response {
+	err := s.ensureUnlocked(noPrompt)
+	if err == nil {
+		return nil
+	}
+	code := ipc.CodeLocked
+	if errors.Is(err, ErrDenied) {
+		code = ipc.CodeDenied // a denied Touch ID (the unwrap is the presence proof)
+	}
+	r := errResp(id, code, err.Error())
+	return &r
+}
+
 // maxScrubReplyBytes bounds how many RAW masked bytes the daemon emits in a single
 // scrub reply, so the JSON-RPC line stays under the Decoder's 1 MiB cap (ipc.NewDecoder)
 // no matter how far the input inflated. ScrubResult.Masked is base64-encoded in JSON
@@ -348,6 +392,11 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if s.resolver == nil {
 			return errResp(req.ID, ipc.CodeInternal, "resolver not configured")
 		}
+		// Open the session on demand (one Touch ID) unless the caller opted out via
+		// NoPrompt — see ensureUnlocked. A locked agent run thus gets CodeLocked (exit 69).
+		if rejection := s.ensureUnlockedResp(req.ID, p.NoPrompt); rejection != nil {
+			return *rejection
+		}
 		vals, err := s.resolver.Resolve(p.Profile, p.Manifest)
 		if err != nil {
 			code := ipc.CodeInternal
@@ -416,8 +465,15 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
+		// Resolve the writable backend FIRST so a routing/config fault (unknown / read-only
+		// backend, or no local vault yet) surfaces its precise hint regardless of lock state;
+		// THEN open the session on demand before the actual write (one Touch ID, or CodeLocked
+		// for an agent via NoPrompt). Order: backend hint before the write's unlock gate.
 		w, rejection := s.writer(req.ID, p.Backend)
 		if rejection != nil {
+			return *rejection
+		}
+		if rejection := s.ensureUnlockedResp(req.ID, p.NoPrompt); rejection != nil {
 			return *rejection
 		}
 		// SECURITY: p.Value is the secret; it flows ONLY into the backend's Add. It is
@@ -434,8 +490,12 @@ func (s *Server) dispatch(cs *connState, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errResp(req.ID, ipc.CodeBadRequest, err.Error())
 		}
+		// Backend-resolution hint first (see "add"), then the on-demand unlock before Remove.
 		w, rejection := s.writer(req.ID, p.Backend)
 		if rejection != nil {
+			return *rejection
+		}
+		if rejection := s.ensureUnlockedResp(req.ID, p.NoPrompt); rejection != nil {
 			return *rejection
 		}
 		if err := w.Remove(p.Locator); err != nil {

@@ -50,6 +50,13 @@ terminal**. It will not print to a pipe or a file. Do not call `av read` to capt
 a value — it is the deliberate guard against an agent reading a secret directly. If
 you need a credential for a command, use `av run`.
 
+## 5. A locked vault is a pause, not a failure (`AV_NO_PROMPT`)
+
+The generated hook exports `AV_NO_PROMPT=1`, so when the vault is locked your `av
+run` / `av read` / `av add` exits **69** (`EX_UNAVAILABLE`) instead of blocking on a
+Touch ID prompt. Treat exit 69 as "ask a human to run `av unlock`", then retry —
+never try to bypass it.
+
 ---
 
 ## Scrub-coverage contract (for whoever wires the hooks)

@@ -27,6 +27,10 @@ pieces into whatever hook system your agent provides.
 - **`av read` is for a human at a TTY only.** `av read NAME` refuses unless stdout is
   a real terminal, so an agent cannot capture a value through a pipe. Use `av run`
   for credentials.
+- **A locked vault is a pause, not a failure (`AV_NO_PROMPT`).** The generated hook
+  exports `AV_NO_PROMPT=1`, so a locked vault makes `av run`/`av read`/`av add` exit
+  **69** (`EX_UNAVAILABLE`) instead of blocking on a Touch ID. Treat exit 69 as "ask a
+  human to run `av unlock`", then retry — do not try to bypass it.
 
 ## Scrub-coverage contract
 

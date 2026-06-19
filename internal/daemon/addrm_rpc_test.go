@@ -54,6 +54,8 @@ func addrmServer(t *testing.T, vaultPath string, id age.Identity) (string, *bufL
 	reg.Register("mock", mockBE{data: map[string]string{"GH": "ghp_xyz"}}) // read-only
 	log := &bufLogger{}
 	sess := NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute) // add/rm gate on an OPEN session (ensureUnlocked); these
+	// tests exercise the write/audit/error-mapping paths, not the lock gate.
 	srv.SetResolver(NewResolver(reg, NewStubPresence(), sess))
 	srv.SetAudit(log)
 	go srv.Serve()

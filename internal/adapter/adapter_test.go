@@ -161,6 +161,32 @@ func TestGenericVariant(t *testing.T) {
 	}
 }
 
+// TestAdapterExportsNoPrompt: every generated agent's hook script must export
+// AV_NO_PROMPT=1 so the AGENT path returns the clean exit-69 pause (a human unlocks)
+// instead of blocking the agent on an on-demand Touch ID. The hook is the shell entry
+// point that runs `av scrub`, and it also fronts the agent's `av run` calls' environment.
+func TestAdapterExportsNoPrompt(t *testing.T) {
+	for _, agent := range KnownAgents() {
+		files, err := Files(agent)
+		if err != nil {
+			t.Fatalf("Files(%q): %v", agent, err)
+		}
+		var sawHook bool
+		for _, f := range files {
+			if !strings.HasSuffix(f.Path, ".sh") {
+				continue
+			}
+			sawHook = true
+			if !strings.Contains(f.Content, "AV_NO_PROMPT=1") {
+				t.Errorf("%s hook %s must export AV_NO_PROMPT=1, got:\n%s", agent, f.Path, f.Content)
+			}
+		}
+		if !sawHook {
+			t.Errorf("%s set has no hook script to carry AV_NO_PROMPT", agent)
+		}
+	}
+}
+
 // TestWriteCreatesFiles: Write materializes every file under dir at its relative path,
 // with the declared mode for the hook script, and the parent dirs are created.
 func TestWriteCreatesFiles(t *testing.T) {

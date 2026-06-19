@@ -41,7 +41,10 @@ func addrmDaemon(t *testing.T, seed map[string]string) (*Client, string, *age.X2
 	}
 	reg := backend.NewRegistry()
 	reg.Register("file", agefile.New(agefile.Static{ID: id}, vault))
-	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), daemon.NewSession(15*time.Minute)))
+	sess := daemon.NewSession(15 * time.Minute)
+	sess.Unlock(15 * time.Minute) // add/rm gate on an OPEN session (ensureUnlocked); these
+	// tests exercise the write/round-trip path, not the on-demand unlock.
+	srv.SetResolver(daemon.NewResolver(reg, daemon.NewStubPresence(), sess))
 	go srv.Serve()
 	t.Cleanup(func() { srv.Close() })
 	return New(path), vault, id

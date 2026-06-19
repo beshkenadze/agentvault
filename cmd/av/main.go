@@ -104,7 +104,7 @@ func runRun(args []string) {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		os.Exit(exitGeneric)
 	}
-	code, err := client.Run(client.New(path), client.RunOptions{
+	code, err := client.Run(client.New(path).WithNoPrompt(noPrompt()), client.RunOptions{
 		Profile: profile,
 		Command: cmdArgs,
 	}, os.Stdout, os.Stderr)
@@ -137,7 +137,7 @@ func runRead(args []string) {
 		os.Exit(exitGeneric)
 	}
 
-	code, err := client.Read(client.New(path), client.ReadOptions{
+	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()), client.ReadOptions{
 		Profile: profile,
 		Name:    name,
 	}, os.Stdout, stdoutIsTTY())
@@ -208,16 +208,24 @@ func runStatus() {
 	fmt.Printf("unlocked, %ds remaining\n", remaining)
 }
 
-// dialClient resolves the default socket path and returns a client bound to it,
-// exiting with a clear message on a path error (shared by unlock/lock/status).
+// dialClient resolves the default socket path and returns a client bound to it (carrying
+// the AV_NO_PROMPT opt-out so add/rm gate cleanly for agents), exiting with a clear
+// message on a path error. Shared by add/rm/unlock/lock/status; only the Resolve/Add/
+// Remove RPCs read NoPrompt, so setting it on every dialClient client is harmless.
 func dialClient() *client.Client {
 	path, err := transport.DefaultSocketPath()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		os.Exit(exitGeneric)
 	}
-	return client.New(path)
+	return client.New(path).WithNoPrompt(noPrompt())
 }
+
+// noPrompt reports the AV_NO_PROMPT agent opt-out: any non-empty value is truthy (agents
+// set AV_NO_PROMPT=1 — see the generated adapter). When set, a locked daemon session is
+// NOT opened with Touch ID on demand; resolve/add/rm return CodeLocked (exit 69) so the
+// agent pauses for a human to unlock instead of blocking on a biometric prompt.
+func noPrompt() bool { return os.Getenv("AV_NO_PROMPT") != "" }
 
 // exitForError maps a client error to an exit code, printing a clear, secret-free
 // message to stderr. A *ipc.RPCError (from resolve) is mapped by its stable Code;
