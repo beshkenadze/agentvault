@@ -15,6 +15,16 @@ Touch-ID-unlocked session; the vault's age key is protected at rest by the best 
 binary can provide (see [Identity protection tiers](#identity-protection-tiers)) and
 unwrapped only into that session, never held at rest.
 
+## Documentation
+
+This README is the one-page overview and reference. For step-by-step guides see
+[`docs/`](docs/):
+
+- [Getting started](docs/getting-started.md) — install → daemon → first secret → `av run`
+- [Agent integration](docs/agent-integration.md) — wire AgentVault into Claude Code / any agent
+- [Security model](docs/security-model.md) — threat model, guarantees, identity tiers
+- [Troubleshooting](docs/troubleshooting.md) — Touch ID, locked vault, version skew, exit codes
+
 ## Install
 
 ```sh
@@ -213,7 +223,8 @@ a human" error and pause instead.
 
 `av init --agent claude-code|generic` generates the adapter files (a hook that pipes
 agent output through `av scrub`, plus a skill/doc) into your project so the agent's
-output is redacted automatically.
+output is redacted automatically. See the [agent integration guide](docs/agent-integration.md)
+for the wiring, the two-layer model, and the scrub-coverage contract.
 
 ## Verification & development
 
