@@ -50,6 +50,8 @@ func main() {
 		runPing()
 	case "run":
 		runRun(os.Args[2:])
+	case "env":
+		runEnv(os.Args[2:])
 	case "read":
 		runRead(os.Args[2:])
 	case "unlock":
@@ -77,7 +79,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -120,6 +122,80 @@ func runRun(args []string) {
 		os.Exit(exitForError(err))
 	}
 	os.Exit(code)
+}
+
+// envOptions are the parsed flags of `av env`.
+type envOptions struct {
+	envFile string // --env-file (default ".env")
+	profile string // --profile (merged from agentvault.yaml; "" => default "smoke" in EnvRun)
+	noMask  bool   // --no-mask
+}
+
+// runEnv parses `av env [--env-file PATH] [--profile P] [--no-mask] -- cmd...` and runs
+// cmd with .env (and/or agentvault.yaml) av:// references resolved into its environment.
+func runEnv(args []string) {
+	o := envOptions{envFile: ".env"}
+	cmdArgs, err := parseEnvArgs(args, &o)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	path, err := transport.DefaultSocketPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		os.Exit(exitGeneric)
+	}
+	code, err := client.EnvRun(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.EnvOptions{
+		EnvFilePath: o.envFile,
+		Profile:     o.profile,
+		NoMask:      o.noMask,
+		Command:     cmdArgs,
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	os.Exit(code)
+}
+
+// parseEnvArgs extracts --env-file / --profile / --no-mask and the child argv (after
+// `--`). The child command is required.
+func parseEnvArgs(args []string, o *envOptions) ([]string, error) {
+	if o.envFile == "" {
+		o.envFile = ".env"
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			cmd := args[i+1:]
+			if len(cmd) == 0 {
+				return nil, fmt.Errorf("no command given (use: av env [flags] -- cmd args...)")
+			}
+			return cmd, nil
+		case a == "--env-file":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--env-file needs a value")
+			}
+			o.envFile = args[i+1]
+			i++
+		case len(a) > 11 && a[:11] == "--env-file=":
+			o.envFile = a[11:]
+		case a == "--profile":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--profile needs a value")
+			}
+			o.profile = args[i+1]
+			i++
+		case len(a) > 10 && a[:10] == "--profile=":
+			o.profile = a[10:]
+		case a == "--no-mask":
+			o.noMask = true
+		default:
+			return nil, fmt.Errorf("unexpected argument %q (flags must precede --)", a)
+		}
+	}
+	return nil, fmt.Errorf("no command given (use: av env [flags] -- cmd args...)")
 }
 
 // runRead parses `av read [--profile P] NAME`, resolves the single logical name
