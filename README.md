@@ -159,6 +159,7 @@ profiles:
 ```
 av ping                                 reach the daemon (prints pong)
 av run [--profile P] -- cmd args...     run cmd with secrets injected, output masked
+av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...   run cmd with .env av:// refs resolved + injected (output masked)
 av read [--backend file|--profile P] NAME   print one secret to a TTY only (default: av://file/NAME, no manifest)
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
@@ -178,6 +179,15 @@ needed); `--backend` picks another backend and `--profile P` resolves through th
 manifest instead (the two modes are mutually exclusive). Daemon errors map to stable,
 secret-free exit codes: **69** (vault locked), **77** (access denied, dangerous tier),
 **2** (bad request, e.g. unknown profile). `av run`'s `--profile` defaults to `smoke`.
+
+`av env` brings the same brokering to an existing `.env`-based app. A `.env` value that
+is an `av://` reference is resolved at runtime and injected into the child; literals like
+`MSSQL_PORT=1433` pass through unchanged. The `.env` refs merge with the `--profile`
+`agentvault.yaml` profile — a name defined in both is a hard error, not a guess at
+precedence. One Touch ID covers all normal-tier secrets (a single resolve), the output is
+masked by default (`--no-mask` disables layer-1 source masking), and it is fail-closed: if
+any reference can't resolve, or neither a `.env` nor an `agentvault.yaml` source exists, no
+child is started. Secrets are never written to disk — the `.env` holds only references.
 
 `av setup` provisions the local age vault and **auto-picks the strongest key tier the
 binary can provide** (see [Identity protection tiers](#identity-protection-tiers)):

@@ -120,6 +120,20 @@ av run --profile smoke -- npm whoami
 # prints your npm login; the token is never written to .npmrc
 ```
 
+### An existing `.env`-based app
+
+If your app already loads its config from a `.env`, you don't need a profile. Make the
+secret a *reference* instead of a value and run the app under `av env` — the reference is
+resolved from the vault at launch and injected into the process, never written to `.env`:
+
+```sh
+# .env contains:  OPENAI_API_KEY=av://file/OPENAI_API_KEY
+av env -- bun --bun next dev      # resolved from the vault at launch; never written to .env
+```
+
+Plain literals in the `.env` (e.g. `MSSQL_PORT=1433`) pass through unchanged, and the
+child's output is masked by default, exactly as with `av run`.
+
 ## Auto-unlock (no explicit `unlock` needed)
 
 The age key is only ever held in an unlocked, `mlock`'d session — zeroized on `av lock`,
