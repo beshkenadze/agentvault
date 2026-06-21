@@ -159,7 +159,7 @@ profiles:
 ```
 av ping                                 reach the daemon (prints pong)
 av run [--profile P] -- cmd args...     run cmd with secrets injected, output masked
-av read [--profile P] NAME              print one secret — to a TTY only (refuses a pipe)
+av read [--backend file|--profile P] NAME   print one secret to a TTY only (default: av://file/NAME, no manifest)
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
 av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the local age vault (auto-picks the tier)
@@ -172,9 +172,12 @@ av version                              print av/avd versions, active key tier, 
 ```
 
 `av read` refuses when stdout is not a terminal (exit **80**) so a piped secret cannot
-leak — agents must use `av run`. Daemon errors map to stable, secret-free exit codes:
-**69** (vault locked), **77** (access denied, dangerous tier), **2** (bad request,
-e.g. unknown profile). `--profile` defaults to `smoke`.
+leak — agents must use `av run`. By default `av read NAME` reads `av://file/NAME`
+directly from the writable vault (symmetric with `av add`/`av rm`, no `agentvault.yaml`
+needed); `--backend` picks another backend and `--profile P` resolves through the
+manifest instead (the two modes are mutually exclusive). Daemon errors map to stable,
+secret-free exit codes: **69** (vault locked), **77** (access denied, dangerous tier),
+**2** (bad request, e.g. unknown profile). `av run`'s `--profile` defaults to `smoke`.
 
 `av setup` provisions the local age vault and **auto-picks the strongest key tier the
 binary can provide** (see [Identity protection tiers](#identity-protection-tiers)):
