@@ -72,3 +72,13 @@ func (m *Manifest) Profile(name string) (Profile, bool) {
 	p, ok := m.Profiles[name]
 	return p, ok
 }
+
+// Synthetic builds an in-memory manifest holding one profile with a single entry,
+// serialized to the YAML bytes Parse accepts. Direct-addressing paths that resolve a
+// ref without an on-disk agentvault.yaml use it — `av read --backend NAME` (and `av
+// env`) construct av://<backend>/<NAME> and resolve it through the same path as a real
+// profile. Serialization stays here so the schema has a single owner (SSOT).
+func Synthetic(profile, name, ref string, tier Tier) ([]byte, error) {
+	m := Manifest{Profiles: map[string]Profile{profile: {name: {Ref: ref, Tier: tier}}}}
+	return yaml.Marshal(m)
+}

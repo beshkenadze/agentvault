@@ -77,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--profile P] NAME  (prints a secret to a TTY only; refuses a pipe)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -131,8 +131,9 @@ func runRun(args []string) {
 // os.ModeCharDevice (no new dependency); client.Read takes it as a parameter so
 // the refusal branch is unit-testable without a terminal.
 func runRead(args []string) {
-	profile := "smoke" // default profile; override with --profile
-	name, err := parseReadArgs(args, &profile)
+	profile := ""     // empty => DIRECT mode; --profile switches to MANIFEST mode
+	backend := "file" // DIRECT mode default: the writable age vault (symmetric with av add)
+	name, err := parseReadArgs(args, &profile, &backend)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "av:", err)
 		usage()
@@ -145,10 +146,16 @@ func runRead(args []string) {
 		os.Exit(exitGeneric)
 	}
 
-	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), client.ReadOptions{
-		Profile: profile,
-		Name:    name,
-	}, os.Stdout, stdoutIsTTY())
+	// --profile selects MANIFEST mode; otherwise DIRECT mode reads av://<backend>/NAME
+	// straight from the writable backend (no agentvault.yaml needed).
+	opts := client.ReadOptions{Name: name}
+	if profile != "" {
+		opts.Profile = profile
+	} else {
+		opts.Backend = backend
+	}
+
+	code, err := client.Read(client.New(path).WithNoPrompt(noPrompt()).WithVersion(version), opts, os.Stdout, stdoutIsTTY())
 	if err != nil {
 		// A *ipc.RPCError (resolve: locked/denied/bad-request) maps via exitForError.
 		// Otherwise client.Read already chose the exit code (refused=80, missing
@@ -411,11 +418,15 @@ func parseInitArgs(args []string) (initOptions, error) {
 	return opt, nil
 }
 
-// parseReadArgs extracts --profile and the single positional NAME from
-// `av read [--profile P] NAME`. Exactly one positional name is required.
-func parseReadArgs(args []string, profile *string) (string, error) {
+// parseReadArgs extracts the single positional NAME and the addressing mode for
+// `av read`. Default (no flags) is DIRECT mode against the writable backend
+// (--backend file) — symmetric with av add/av rm, so a value stored via `av add NAME`
+// reads back with `av read NAME` and NO agentvault.yaml. --profile P switches to
+// MANIFEST mode (resolve NAME through agentvault.yaml). --backend and --profile are
+// mutually exclusive (two different addressing modes). Exactly one NAME is required.
+func parseReadArgs(args []string, profile *string, backend *string) (string, error) {
 	var name string
-	have := false
+	have, sawProfile, sawBackend := false, false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -424,9 +435,21 @@ func parseReadArgs(args []string, profile *string) (string, error) {
 				return "", fmt.Errorf("--profile needs a value")
 			}
 			*profile = args[i+1]
+			sawProfile = true
 			i++
 		case len(a) > 10 && a[:10] == "--profile=":
 			*profile = a[10:]
+			sawProfile = true
+		case a == "--backend":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--backend needs a value")
+			}
+			*backend = args[i+1]
+			sawBackend = true
+			i++
+		case len(a) > 10 && a[:10] == "--backend=":
+			*backend = a[10:]
+			sawBackend = true
 		default:
 			if have {
 				return "", fmt.Errorf("av read takes exactly one NAME")
@@ -435,8 +458,11 @@ func parseReadArgs(args []string, profile *string) (string, error) {
 			have = true
 		}
 	}
+	if sawProfile && sawBackend {
+		return "", fmt.Errorf("use either --backend (direct) or --profile (manifest), not both")
+	}
 	if !have {
-		return "", fmt.Errorf("av read needs a NAME (use: av read [--profile P] NAME)")
+		return "", fmt.Errorf("av read needs a NAME (use: av read [--backend file] NAME)")
 	}
 	return name, nil
 }
