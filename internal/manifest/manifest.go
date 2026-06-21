@@ -73,12 +73,17 @@ func (m *Manifest) Profile(name string) (Profile, bool) {
 	return p, ok
 }
 
-// Synthetic builds an in-memory manifest holding one profile with a single entry,
-// serialized to the YAML bytes Parse accepts. Direct-addressing paths that resolve a
-// ref without an on-disk agentvault.yaml use it — `av read --backend NAME` (and `av
-// env`) construct av://<backend>/<NAME> and resolve it through the same path as a real
-// profile. Serialization stays here so the schema has a single owner (SSOT).
-func Synthetic(profile, name, ref string, tier Tier) ([]byte, error) {
-	m := Manifest{Profiles: map[string]Profile{profile: {name: {Ref: ref, Tier: tier}}}}
+// SyntheticProfile builds an in-memory manifest holding one profile with the given
+// entries, serialized to the YAML bytes Parse accepts. Direct-addressing paths that
+// resolve refs without an on-disk agentvault.yaml use it — `av env` merges its .env
+// refs (and any yaml profile) into one synthetic profile and resolves it through the
+// same path as a real profile. Serialization stays here so the schema has one owner.
+func SyntheticProfile(profile string, entries map[string]Entry) ([]byte, error) {
+	m := Manifest{Profiles: map[string]Profile{profile: entries}}
 	return yaml.Marshal(m)
+}
+
+// Synthetic is the single-entry convenience used by `av read --backend`.
+func Synthetic(profile, name, ref string, tier Tier) ([]byte, error) {
+	return SyntheticProfile(profile, map[string]Entry{name: {Ref: ref, Tier: tier}})
 }
