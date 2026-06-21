@@ -70,3 +70,20 @@ func TestSplitMalformedRefErrors(t *testing.T) {
 		t.Errorf("error %q should name the offending key", err)
 	}
 }
+
+// TestSplitEmptyInput: no pairs yields empty (non-nil) maps and no error, so callers
+// can range/index both returns unconditionally.
+func TestSplitEmptyInput(t *testing.T) {
+	refs, literals, err := Split(map[string]string{})
+	if err != nil || len(refs) != 0 || len(literals) != 0 {
+		t.Fatalf("empty input: refs=%v literals=%v err=%v", refs, literals, err)
+	}
+}
+
+// TestSplitBareSchemeErrors: the bare scheme "av://" (no backend/locator) is the lower
+// extreme of the fail-closed boundary — it must hard-error, never become a literal.
+func TestSplitBareSchemeErrors(t *testing.T) {
+	if _, _, err := Split(map[string]string{"X": "av://"}); err == nil {
+		t.Fatal("bare av:// must hard-error, not become a literal")
+	}
+}
