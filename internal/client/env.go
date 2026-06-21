@@ -38,6 +38,9 @@ func EnvRun(cl *Client, opts EnvOptions, stdout, stderr io.Writer) (exitCode int
 	if manPath == "" {
 		manPath = defaultManifestPath
 	}
+	// profile is the agentvault.yaml profile to LOOK UP (default "smoke"). Distinct from
+	// syntheticEnvProfile ("_env"), the in-memory profile the merged entries are resolved
+	// under — don't conflate the two.
 	profile := opts.Profile
 	if profile == "" {
 		profile = "smoke"

@@ -57,7 +57,7 @@ func TestEnvRunNoSourcesErrors(t *testing.T) {
 	cl := newRunServer(t)
 	dir := t.TempDir()
 	code, err := EnvRun(cl, EnvOptions{
-		EnvFilePath:  filepath.Join(dir, ".env"),             // absent
+		EnvFilePath:  filepath.Join(dir, ".env"),            // absent
 		ManifestPath: filepath.Join(dir, "agentvault.yaml"), // absent
 		Command:      []string{"sh", "-c", "echo nope"},
 	}, &bytes.Buffer{}, &bytes.Buffer{})
@@ -85,5 +85,57 @@ func TestEnvRunNoMask(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "topsecret") {
 		t.Fatalf("--no-mask should pass the value through, got %q", stdout.String())
+	}
+}
+
+// TestEnvRunYamlOnlyFallback: with no .env but an agentvault.yaml present, the chosen
+// profile (default smoke) carries the load — this is the only path that exercises the
+// yaml merge loop feeding `entries`.
+func TestEnvRunYamlOnlyFallback(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	cl := newRunServer(t)
+	man := writeManifest(t) // smoke: SECRET -> av://mock/S
+	seen := filepath.Join(t.TempDir(), "seen.txt")
+
+	var stdout, stderr bytes.Buffer
+	code, err := EnvRun(cl, EnvOptions{
+		EnvFilePath:  filepath.Join(t.TempDir(), ".env"), // absent
+		ManifestPath: man,
+		Command:      []string{"sh", "-c", "printf '%s' \"$SECRET\" > " + seen},
+	}, &stdout, &stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("EnvRun (yaml-only): code=%d err=%v", code, err)
+	}
+	b, _ := os.ReadFile(seen)
+	if string(b) != "topsecret" {
+		t.Fatalf("SECRET not injected from the yaml profile: %q", b)
+	}
+}
+
+// TestEnvRunConflictErrors: a NAME defined in BOTH .env and the yaml profile is a hard
+// error — fail-closed, no child started (don't guess precedence / downgrade a tier).
+func TestEnvRunConflictErrors(t *testing.T) {
+	t.Setenv("AV_TEST_AUTH", "allow")
+	cl := newRunServer(t)
+	man := writeManifest(t)                        // smoke defines SECRET
+	env := writeEnvFile(t, "SECRET=av://mock/S\n") // .env also defines SECRET
+
+	var stdout, stderr bytes.Buffer
+	code, err := EnvRun(cl, EnvOptions{
+		EnvFilePath:  env,
+		ManifestPath: man,
+		Command:      []string{"sh", "-c", "echo CHILD_RAN"},
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("a name in both .env and the yaml profile must hard-error")
+	}
+	if code == 0 {
+		t.Fatalf("exit = %d, want non-zero on conflict", code)
+	}
+	if !strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("error %q should name the conflicting key", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("fail-closed: no child should run on conflict; stdout=%q", stdout.String())
 	}
 }
