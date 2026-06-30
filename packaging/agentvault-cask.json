@@ -5,6 +5,7 @@
   "homepage": "https://github.com/bshk-app/agentvault",
   "appBundle": "AgentVault.app",
   "dependsOnMacOS": true,
+  "livecheck": false,
   "binary": ["av"],
   "zapTrash": [
     "~/.config/agentvault",
