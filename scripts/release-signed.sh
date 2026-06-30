@@ -56,8 +56,16 @@ CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$APP/Contents/Mac
 # NOTE: do NOT embed the provisioning profile here — zamokctl embeds it (--provisioning-profile)
 # immediately before codesigning, so the signature seals it.
 sed "s/__VERSION__/$VER/g"     "$ROOT/packaging/avd.app.Info.plist.template" > "$APP/Contents/Info.plist"
+# Entitlements authorize the Secure Enclave for the SIGNED avd bundle:
+# SecKeyCreateRandomKey + kSecAttrTokenIDSecureEnclave (internal/enclave/enclave_darwin.m)
+# fails errSecMissingEntitlement (-34018) without com.apple.application-identifier authorized
+# by the embedded Developer ID profile; keychain-access-groups is the key item's home group.
+# (`av` is NOT signed with these — it never calls SecKey.) The entitlements file MUST be a bare
+# plist with NO XML comments — Apple's AMFI parser (codesign/notary) rejects them — so we
+# normalize with plutil after substitution (also validates the rendered XML).
 ENTITLEMENTS="$DIST/avd.entitlements"
 sed "s/__TEAM_ID__/$TEAM_ID/g" "$ROOT/packaging/avd.entitlements.template"   > "$ENTITLEMENTS"
+plutil -convert xml1 "$ENTITLEMENTS"
 
 # ---- sign + notarize + staple + tarball + manifest — all in zamokctl --------------------
 # minMacOS, bundleId, versions are read from AgentVault.app/Contents/Info.plist (single source of
