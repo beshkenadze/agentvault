@@ -614,9 +614,28 @@ func runSetup(args []string) {
 	}
 	if res.Created {
 		fmt.Printf("created vault %s\n  identity %s\n", res.VaultPath, res.IdentityPath)
+		enableLoginItemBestEffort()
 		return
 	}
 	fmt.Printf("already provisioned: %s\n", res.VaultPath)
+}
+
+// enableLoginItemBestEffort registers avd to start at login as part of the deliberate
+// `av setup` action (the standards-correct trigger). Best-effort: a failure (e.g.
+// SMAppService requires-approval, or an older daemon without the RPC) must NOT fail
+// setup — the vault is already provisioned. It prints how to manage/undo it.
+func enableLoginItemBestEffort() {
+	res, err := dialClient().Service("enable")
+	if err != nil {
+		fmt.Println("note: could not enable start-at-login automatically; run `av service on`.")
+		return
+	}
+	switch res.State {
+	case "requires-approval":
+		fmt.Println("avd added to Login Items — approve it in System Settings → General → Login Items.")
+	default:
+		fmt.Println("avd will start at login. Manage it in System Settings → General → Login Items, or `av service off`.")
+	}
 }
 
 // parseSetupArgs extracts the `av setup` flags (no values; only the `--flag` form).

@@ -25,6 +25,7 @@ import (
 	"github.com/beshkenadze/agentvault/internal/enclave"
 	"github.com/beshkenadze/agentvault/internal/ipc"
 	"github.com/beshkenadze/agentvault/internal/keystore"
+	"github.com/beshkenadze/agentvault/internal/loginitem"
 	"github.com/beshkenadze/agentvault/internal/provision"
 	"github.com/beshkenadze/agentvault/internal/transport"
 )
@@ -103,6 +104,12 @@ func main() {
 	// wrap/unwrap seam and default paths as registerBackends (DRY) — avd owns the
 	// age+enclave linkage while the daemon dispatch stays crypto-free.
 	srv.SetProvisioner(makeProvisioner(reg, sess, srv, wrap, unwrap, store, read, presence))
+
+	// Wire the login-item Manager so the `service` RPC can register/unregister avd at
+	// login. This ONLY makes the RPC available — avd never calls Enable on its own:
+	// registration is a deliberate user action (`av setup` / `av service on`), never an
+	// avd-start side effect, so it can't fight the user's System Settings toggle.
+	srv.SetLoginItem(loginitem.New())
 
 	// Auto-lock observers (screen-lock/sleep on darwin; no-op elsewhere) re-lock the
 	// SAME session. stop() removes them on shutdown.
