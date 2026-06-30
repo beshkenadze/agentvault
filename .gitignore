@@ -4,5 +4,6 @@
 *.out
 .DS_Store
 .claude/
+claudedocs/
 # account-specific signing material — never commit
 *.provisionprofile
