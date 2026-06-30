@@ -44,10 +44,14 @@ future signed Cask (`brew install --cask …`, planned).
 
 ```sh
 brew install beshkenadze/tap/agentvault
-brew services start agentvault          # run avd as a per-user LaunchAgent
-av setup                                # provision the local age vault (auto-picks the key tier)
+av setup                                # provision the vault + register avd to start at login
 av add GITHUB_TOKEN                     # hidden prompt; the value never touches argv
 ```
+
+`av setup` also registers `avd` to start at login (`SMAppService` on the signed cask, a
+per-user LaunchAgent on build-from-source). macOS shows a one-time "added background item"
+notice; manage it in **System Settings → General → Login Items** or with `av service
+on|off|status` (see [docs/launchagent.md](docs/launchagent.md)).
 
 No explicit `av unlock` is needed: the first operation that needs the key (here `av
 add`) prompts Touch ID on demand and opens the session for ~15 minutes. `av unlock`
@@ -163,7 +167,8 @@ av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...   run cmd with
 av read [--backend file|--profile P] NAME   print one secret to a TTY only (default: av://file/NAME, no manifest)
 av add [--backend file] NAME            store a value (hidden prompt or stdin; never argv)
 av rm  [--backend file] NAME            delete a value from the writable vault
-av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the local age vault (auto-picks the tier)
+av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]   provision the vault + register avd at login
+av service on|off|status                start avd at login (manage in System Settings → Login Items)
 av init --agent claude-code|generic [--dir D] [--force]   generate adapter files
 av unlock                               Touch ID — open the session (optional; ops auto-unlock)
 av lock                                 re-lock and clear issued values
@@ -202,7 +207,7 @@ prints the `av` version and notes `avd (not running)`.
 **Self-healing after an upgrade.** After `brew upgrade`, the already-running `avd` keeps
 serving the old code until it is restarted. `av` handles this automatically: on the next
 command, if it sees a version skew (both release builds), it shuts the stale daemon down,
-lets the new binary take over, and retries — no manual `brew services restart` needed.
+lets the new binary take over, and retries — no manual restart needed.
 Agents (`AV_NO_PROMPT=1`) never restart the daemon; they get a clear "avd outdated — ask
 a human" error and pause instead.
 
@@ -248,8 +253,8 @@ tests — verify them manually:
   ephemeral daemon and vault; no Touch ID).
 - `scripts/smoke-backends.sh` — real Keychain (and optional 1Password) resolution.
 - `scripts/manual-touchid-smoke.sh` — the human-in-the-loop Touch ID / auto-lock check.
-- `docs/launchagent.md` — running `avd` as a per-user LaunchAgent (when not using
-  `brew services`).
+- `docs/launchagent.md` — running `avd` at login and the `av service` login-item
+  verification checklist.
 
 Build and test from source with `make build` and `make test`.
 

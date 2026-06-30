@@ -1,61 +1,52 @@
-# Running `avd` as a per-user LaunchAgent (macOS)
+# Running `avd` at login (macOS)
 
 `av unlock` triggers a Touch ID prompt via `LocalAuthentication`. That prompt can
 only be presented from a process running in the user's **Aqua/GUI session**.
-Therefore `avd` must run as a **per-user LaunchAgent**, never as a system
+Therefore `avd` must run as a **per-user login item**, never as a system
 `LaunchDaemon` (a LaunchDaemon has no GUI session and the prompt silently fails).
 
-> **Note:** With the Homebrew install, `brew services start agentvault` runs `avd`
-> as the per-user LaunchAgent for you. The manual steps below are for building from
-> source or verifying the Touch ID path by hand.
+## What `av service` does
 
-> **Status:** Phase 5 ships the plist template and these steps. `av init`
-> (Phase 6) will generate and install this for you. The steps below are the
-> **manual verification path** for the Touch ID work in Phase 5 — a green `go build`
-> proves the cgo compiles, not that the prompt works; only this does.
+`av setup` registers `avd` to start at login, and `av service on|off|status` manages
+that registration afterward. You do not edit a plist or run `launchctl` by hand —
+`avd` owns the registration (`SMAppService` resolves the plist relative to *avd's* own
+bundle, which `av` is not in), so the CLI is a thin RPC to the daemon.
 
-> **Provisioning the vault:** you do not need to create an identity file by hand. Run
-> `av setup` once (after `avd` is running) and it auto-picks the best key tier — the
-> login keychain on a build-from-source install (no on-disk `identity.txt`). The
-> `__AGE_IDENTITY_FILE__` placeholder below is only relevant to the explicit plaintext
-> tier (`av setup --plaintext`). See the README's "Identity protection tiers".
+Two backends, selected at runtime:
 
-## Install
+- **`SMAppService`** (the signed cask, macOS 13+) — the LaunchAgent plist is sealed
+  inside `AgentVault.app/Contents/Library/LaunchAgents/` and registered via
+  `SMAppService`. `av service status` reports `smappservice` and can show
+  `requires-approval` (registered, but you must allow it in System Settings).
+- **`launchagent`** (build-from-source) — `avd` writes
+  `~/Library/LaunchAgents/app.bshk.agentvault.avd.plist` (an absolute `ProgramArguments`
+  path, `Interactive` ProcessType so Touch ID is presentable) and bootstraps it into
+  your GUI session. `av service status` reports `launchagent`, `enabled` or `disabled`.
 
-1. Build the binaries:
+```sh
+av service on        # register avd to start at login (idempotent)
+av service status    # login item (smappservice): enabled
+av service off       # unregister; mirrors the System Settings → Login Items toggle
+```
 
-   ```sh
-   make build   # produces bin/av and bin/avd
-   ```
+A plain `avd` start never (re-)registers — it honors whatever you set in **System
+Settings → General → Login Items**.
 
-2. Pick install paths and fill in the plist placeholders. Example using `~/bin`:
+## Manual verification — login item (cannot be unit-tested)
 
-   ```sh
-   mkdir -p ~/bin ~/Library/Logs/agentvault
-   cp bin/av bin/avd ~/bin/
+cgo + `SMAppService` need a signed bundle and a GUI session, so CI can't cover them.
+Verify the real path by hand on a signed install:
 
-   sed \
-     -e "s|__AVD_PATH__|$HOME/bin/avd|" \
-     -e "s|__AGE_IDENTITY_FILE__|$HOME/.config/agentvault/identity.txt|" \
-     -e "s|__AGE_VAULT_FILE__|$HOME/.config/agentvault/vault.age|" \
-     -e "s|__LOG_DIR__|$HOME/Library/Logs/agentvault|" \
-     packaging/app.bshk.agentvault.avd.plist \
-     > ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
-   ```
+```sh
+av setup                 # registers the login item; expect the macOS background-item notice
+av service status        # -> login item (smappservice): enabled   (or requires-approval)
+# System Settings → General → Login Items → AgentVault is listed under "Allow in the Background"
+# log out and back in    # avd is running without any manual launchctl step
+av service off           # -> login item (smappservice): disabled; the entry disappears
+```
 
-3. Load it into the **GUI session** (this is what makes Touch ID presentable):
-
-   ```sh
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
-   launchctl print gui/$(id -u)/app.bshk.agentvault.avd | head   # should show state = running
-   ```
-
-   To reload after changes:
-
-   ```sh
-   launchctl bootout gui/$(id -u)/app.bshk.agentvault.avd 2>/dev/null
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
-   ```
+On a build-from-source install the backend reads `launchagent` and the plist lands at
+`~/Library/LaunchAgents/app.bshk.agentvault.avd.plist`.
 
 ## Manual verification (Touch ID — cannot be automated)
 
@@ -67,8 +58,23 @@ av unlock          # then press Esc / cancel -> exit 69 (or 77), message "vault 
 ```
 
 If `av unlock` returns immediately with "locked" and **no prompt appears**, `avd`
-is not in the GUI session — confirm it was loaded with `launchctl bootstrap
-gui/$(id -u) …` and not as a `LaunchDaemon`.
+is not in the GUI session — re-run `av service on` (which bootstraps it into
+`gui/$(id -u)`), and confirm it is a per-user login item and not a `LaunchDaemon`.
+
+## Manual fallback (launchctl by hand)
+
+`av service on` does this for you; reach for the manual steps only when debugging.
+Build with `make build`, then render and load the plist yourself:
+
+```sh
+mkdir -p ~/bin ~/Library/Logs/agentvault
+cp bin/av bin/avd ~/bin/
+
+# absolute avd path; Interactive ProcessType keeps Touch ID presentable
+launchctl bootout gui/$(id -u)/app.bshk.agentvault.avd 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.bshk.agentvault.avd.plist
+launchctl print gui/$(id -u)/app.bshk.agentvault.avd | head   # state = running
+```
 
 ## Why not a LaunchDaemon
 

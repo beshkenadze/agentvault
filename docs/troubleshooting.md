@@ -23,27 +23,31 @@ on:
 `av version` shows `avd  (not running)`, or commands fail to reach the socket.
 
 ```sh
-brew services start agentvault     # or: brew services restart agentvault
-av version                         # avd should now show a version
+av service on      # register avd to start at login and bring it up now
+av version         # avd should now show a version
 ```
+
+`avd` also starts lazily the first time `av` dials the socket, so most commands bring it
+up on their own — `av service on` is the explicit form and (re-)registers the login item.
 
 If it still won't start, check the logs:
 
 ```sh
-tail -f "$(brew --prefix)/var/log/agentvault/avd.err.log"
+tail -f ~/Library/Logs/agentvault/avd.err.log
 ```
 
-`avd` must run in your **GUI session** (that is what makes Touch ID presentable);
-`brew services` does this for you. If you installed manually, see
-[running avd as a LaunchAgent](launchagent.md).
+`avd` must run in your **GUI session** (that is what makes Touch ID presentable); the
+login item registered by `av setup` / `av service on` runs it there. See
+[running avd at login](launchagent.md).
 
 ## Touch ID prompt never appears
 
 `av unlock` returns immediately with `locked` and no prompt shows.
 
 This means `avd` is not in the GUI/Aqua session. A system `LaunchDaemon` (session 0) has
-no GUI and `LocalAuthentication` fails silently there. Use `brew services start
-agentvault` (per-user LaunchAgent), not a LaunchDaemon. See
+no GUI and `LocalAuthentication` fails silently there. The login item registered by
+`av service on` runs `avd` as a per-user agent in your GUI session — re-run it and
+confirm it is not a `LaunchDaemon`. See
 [launchagent.md](launchagent.md#why-not-a-launchdaemon).
 
 ## After `brew upgrade`, commands behave oddly
@@ -56,8 +60,8 @@ restart needed.
 If you ever need to force it:
 
 ```sh
-brew services restart agentvault
-av version     # av and avd versions should now match
+av service off && av service on   # bounce the login item; the new binary takes over
+av version                        # av and avd versions should now match
 ```
 
 `av version` prints a loud warning when `av` and `avd` versions differ.

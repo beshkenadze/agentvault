@@ -23,28 +23,7 @@ the CLT ship clang, which Homebrew already requires).
 it means your vault key is protected by the **login keychain** (the Secure Enclave tier
 needs a signed build; see the [security model](security-model.md#identity-protection-tiers)).
 
-## 2. Start the daemon
-
-```sh
-brew services start agentvault
-```
-
-This runs `avd` as a per-user LaunchAgent in your GUI session — the only context where
-the Touch ID prompt can appear. It starts at login and is kept alive.
-
-Verify:
-
-```sh
-av version
-# av     v0.2.4
-# avd    v0.2.4
-# key    keychain  (Enclave unavailable — unsigned build)
-# socket /Users/you/.../avd.sock
-```
-
-If `avd` shows `(not running)`, see [troubleshooting](troubleshooting.md#the-daemon-isnt-running).
-
-## 3. Provision the vault
+## 2. Provision + start at login
 
 ```sh
 av setup
@@ -52,15 +31,33 @@ av setup
 #   identity /Users/you/.../identity
 ```
 
-`av setup` creates the local age vault and **auto-picks the strongest key tier the
-binary can provide** — never silently downgrading to plaintext. On the build-from-source
-install that is the login keychain. Run it once.
+`av setup` creates the local age vault **and** registers `avd` to start at login —
+`SMAppService` on the signed cask, a per-user LaunchAgent on a build-from-source install.
+It also **auto-picks the strongest key tier the binary can provide** — never silently
+downgrading to plaintext; on the build-from-source install that is the login keychain.
+Run it once.
+
+The first time `avd` registers, macOS shows a one-time "AgentVault added items that can
+run in the background" notice. You can toggle start-at-login any time in **System Settings
+→ General → Login Items**, or with `av service on` / `av service off`.
+
+> The LaunchAgent runs `avd` in your GUI session — the only context where the Touch ID
+> prompt can appear.
+
+Verify:
+
+```sh
+av service status      # login item (smappservice): enabled
+av version             # av/avd versions + active key tier + socket
+```
+
+If `avd` shows `(not running)`, see [troubleshooting](troubleshooting.md#the-daemon-isnt-running).
 
 You do **not** need to run `av unlock` first. The first operation that needs the key
 prompts Touch ID on demand and opens the session for ~15 minutes (see
 [auto-unlock](#auto-unlock-no-explicit-unlock-needed)).
 
-## 4. Store a secret
+## 3. Store a secret
 
 ```sh
 av add GITHUB_TOKEN
@@ -82,7 +79,7 @@ printf '%s' "$MY_TOKEN" | av add GITHUB_TOKEN
 Remove a value with `av rm GITHUB_TOKEN`. The age-file backend is the only writable one;
 Keychain and 1Password are read-only (see [the manifest reference](#the-manifest-agentvaultyaml)).
 
-## 5. Describe a profile
+## 4. Describe a profile
 
 Create `agentvault.yaml` in your project. It maps logical names to backend references
 and access tiers. **It holds no secret values** — commit it.
@@ -99,7 +96,7 @@ profiles:
 `--profile`). See [the manifest reference](#the-manifest-agentvaultyaml) below for tiers
 and references.
 
-## 6. Run a command with the secret
+## 5. Run a command with the secret
 
 ```sh
 av run --profile smoke -- sh -c 'echo $GITHUB_TOKEN'
