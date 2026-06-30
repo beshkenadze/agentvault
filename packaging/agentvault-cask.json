@@ -13,5 +13,5 @@
     "~/Library/Logs/agentvault",
     "~/Library/LaunchAgents/app.bshk.agentvault.avd.plist"
   ],
-  "caveats": "AgentVault runs a per-user background daemon (avd) that holds your secrets and is gated by Touch ID. Start it (and have it relaunch at login) with:\n\n  brew services start agentvault\n\nThen provision the vault once: `av setup`. Unlocking presents a Touch ID prompt, so avd must run in your GUI session — `brew services` handles that for you."
+  "caveats": "AgentVault runs a per-user background daemon (avd), gated by Touch ID. Provision once:\n\n  av setup\n\nThat creates your vault and registers avd to start at login (you'll see a macOS \"added background item\" notice). Manage it any time in System Settings → General → Login Items, or with `av service on` / `av service off`."
 }

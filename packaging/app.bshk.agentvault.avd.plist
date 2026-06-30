@@ -1,50 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Per-user LaunchAgent for the AgentVault broker (avd).
+  Bundled LaunchAgent for SMAppService (macOS 13+). It is sealed inside the signed
+  app at AgentVault.app/Contents/Library/LaunchAgents/ and registered by avd itself
+  via SMAppService.agent(plistName:) (internal/loginitem/smappservice_darwin.m).
 
-  MUST be a LaunchAgent (loaded into the user's Aqua/GUI session), NOT a
-  system LaunchDaemon: a LaunchDaemon has no GUI session and cannot present
-  the Touch ID (LocalAuthentication) prompt that `av unlock` requires.
-
-  Substitute the __PLACEHOLDERS__ for your install, then see docs/launchagent.md.
-  NOTE (Phase 4/5): AV_AGE_IDENTITY / AV_AGE_VAULT configure the file backend.
-  Phase 6 replaces the on-disk identity with a Secure-Enclave-wrapped key and
-  these env vars go away.
+  BundleProgram is RELATIVE to the bundle root, so the signature stays valid wherever
+  the .app is installed. Interactive ProcessType keeps avd in the user's GUI session
+  so LocalAuthentication can present Touch ID. The build-from-source fallback uses a
+  DIFFERENT plist with an absolute path — see internal/loginitem/launchagent.go.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>app.bshk.agentvault.avd</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>__AVD_PATH__</string>
-    </array>
-
-    <!-- Start at login and keep the broker resident. -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/avd</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
-
-    <!-- Interactive: runs in the user's GUI session so LocalAuthentication can
-         present the Touch ID prompt. -->
     <key>ProcessType</key>
     <string>Interactive</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>AV_AGE_IDENTITY</key>
-        <string>__AGE_IDENTITY_FILE__</string>
-        <key>AV_AGE_VAULT</key>
-        <string>__AGE_VAULT_FILE__</string>
-    </dict>
-
-    <!-- Daemon logs (never secret values) for manual verification. -->
-    <key>StandardOutPath</key>
-    <string>__LOG_DIR__/avd.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>__LOG_DIR__/avd.err.log</string>
 </dict>
 </plist>

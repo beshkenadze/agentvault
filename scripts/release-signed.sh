@@ -56,6 +56,13 @@ CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o "$APP/Contents/Mac
 # NOTE: do NOT embed the provisioning profile here — zamokctl embeds it (--provisioning-profile)
 # immediately before codesigning, so the signature seals it.
 sed "s/__VERSION__/$VER/g"     "$ROOT/packaging/avd.app.Info.plist.template" > "$APP/Contents/Info.plist"
+
+# Bundled LaunchAgent for SMAppService (avd registers it at `av setup` time). MUST be
+# in place before signing so the signature seals it (Contents/Library/LaunchAgents).
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp "$ROOT/packaging/app.bshk.agentvault.avd.plist" \
+   "$APP/Contents/Library/LaunchAgents/app.bshk.agentvault.avd.plist"
+
 # Entitlements authorize the Secure Enclave for the SIGNED avd bundle:
 # SecKeyCreateRandomKey + kSecAttrTokenIDSecureEnclave (internal/enclave/enclave_darwin.m)
 # fails errSecMissingEntitlement (-34018) without com.apple.application-identifier authorized
