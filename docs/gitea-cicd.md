@@ -88,7 +88,7 @@ av --version
 ## Promoting to the public GitHub tap
 
 Once the Gitea run is green, the same artifact publishes to GitHub by swapping the publish
-step's flags (no rebuild): `--tap-host github --tap beshkenadze/homebrew-tap` with a
+step's flags (no rebuild): `--tap-host github --tap bshk-app/homebrew-tap` with a
 `GITHUB_TOKEN`, and `--store url --url <github-release-url>` (or `--store git-release
 --asset-repo beshkenadze/agent-vault`). See `docs/signing-and-notarization.md`.
 

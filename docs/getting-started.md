@@ -11,9 +11,9 @@ that your agent never sees in plaintext. It assumes macOS with Touch ID.
 ## 1. Install
 
 ```sh
-brew install beshkenadze/tap/agentvault
+brew install bshk-app/homebrew-tap/agentvault
 # newer Homebrew gates third-party taps; if install is blocked:
-brew tap beshkenadze/tap && brew trust beshkenadze/tap
+brew tap bshk-app/homebrew-tap && brew trust bshk-app/homebrew-tap
 ```
 
 Requires macOS and the Xcode Command Line Tools (the Touch ID path is built with cgo;

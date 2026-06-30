@@ -13,7 +13,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.beshkenadze.agentvault</string>
+    <string>app.bshk.agentvault</string>
     <key>CFBundleName</key>
     <string>AgentVault</string>
     <key>CFBundleExecutable</key>

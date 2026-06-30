@@ -12,7 +12,7 @@
 # it ships as a bare, signed+notarized binary (no entitlements, never stapled).
 #
 # Prereqs:
-#   - zamokctl on PATH                          (brew install beshkenadze/tap/zamokctl)
+#   - zamokctl on PATH                          (brew install bshk-app/homebrew-tap/zamokctl)
 #   - Developer ID Application cert in the login keychain   (security find-identity -p codesigning -v)
 #   - notarytool keychain profile               (xcrun notarytool store-credentials <NOTARY_PROFILE>)
 #   - a Developer ID provisioning profile authorizing the App ID's entitlements, at $PROFILE_PATH
@@ -24,7 +24,12 @@ set -euo pipefail
 # ---- config (override via env) ---------------------------------------------------------
 TEAM_ID="${TEAM_ID:-__TEAM_ID__}"                            # 10-char Apple Team ID (entitlements subst)
 SIGN_IDENTITY_SHA1="${SIGN_IDENTITY_SHA1:-}"                 # 40-hex Developer ID Application SHA-1
-NOTARY_PROFILE="${NOTARY_PROFILE:-AgentVault}"               # notarytool store-credentials name
+NOTARY_PROFILE="${NOTARY_PROFILE:-AgentVault}"               # notarytool store-credentials name (local/self-hosted)
+# CI alternative to a stored keychain profile: pass the App Store Connect API key directly, so a
+# GitHub-hosted runner needs no `notarytool store-credentials`. When NOTARY_API_KEY_P8 is set it wins.
+NOTARY_API_KEY_P8="${NOTARY_API_KEY_P8:-}"                   # path to the .p8 key file
+NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"                           # App Store Connect key id
+NOTARY_ISSUER="${NOTARY_ISSUER:-}"                           # App Store Connect issuer UUID
 PROFILE_PATH="${PROFILE_PATH:-packaging/agentvault.provisionprofile}"
 VERSION="${1:-$(git describe --tags --always 2>/dev/null || echo dev)}"
 VER="${VERSION#v}"                                           # CFBundle* / Cask want no leading 'v'
@@ -38,7 +43,7 @@ TARBALL="$DIST/AgentVault-${VER}.tar.gz"                     # zamokctl names it
 [ "$TEAM_ID" = "__TEAM_ID__" ] && { echo "set TEAM_ID / SIGN_IDENTITY_SHA1 / NOTARY_PROFILE — see docs/signing-and-notarization.md" >&2; exit 2; }
 [ -n "$SIGN_IDENTITY_SHA1" ]   || { echo "set SIGN_IDENTITY_SHA1 (security find-identity -p codesigning -v)" >&2; exit 2; }
 [ -f "$PROFILE_PATH" ]         || { echo "missing provisioning profile at $PROFILE_PATH" >&2; exit 2; }
-command -v zamokctl >/dev/null || { echo "zamokctl not on PATH — brew install beshkenadze/tap/zamokctl" >&2; exit 2; }
+command -v zamokctl >/dev/null || { echo "zamokctl not on PATH — brew install bshk-app/homebrew-tap/zamokctl" >&2; exit 2; }
 
 rm -rf "$DIST"; mkdir -p "$APP/Contents/MacOS"
 
@@ -58,6 +63,13 @@ sed "s/__TEAM_ID__/$TEAM_ID/g" "$ROOT/packaging/avd.entitlements.template"   > "
 # minMacOS, bundleId, versions are read from AgentVault.app/Contents/Info.plist (single source of
 # truth: LSMinimumSystemVersion / CFBundle* in avd.app.Info.plist.template), so manifest.json
 # stays consistent with the bundle zamokctl just signed.
+# notary: a directly-supplied API key (CI) takes precedence over a stored keychain profile (local).
+if [ -n "$NOTARY_API_KEY_P8" ]; then
+  NOTARY_ARGS=( --notary-api-key "$NOTARY_API_KEY_P8" --notary-key-id "$NOTARY_KEY_ID" --notary-issuer "$NOTARY_ISSUER" )
+else
+  NOTARY_ARGS=( --notary-profile "$NOTARY_PROFILE" )
+fi
+
 echo "==> zamokctl package (codesign avd.app w/ entitlements+profile; sign+notarize av; staple; tarball; manifest)"
 zamokctl package \
   --input "$APP" \
@@ -67,10 +79,10 @@ zamokctl package \
   --format tarball \
   --output-dir "$DIST" \
   --signing-identity-sha1 "$SIGN_IDENTITY_SHA1" \
-  --notary-profile "$NOTARY_PROFILE"
+  "${NOTARY_ARGS[@]}"
 
 SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
-URL="https://github.com/beshkenadze/agentvault/releases/download/${VERSION}/$(basename "$TARBALL")"
+URL="https://github.com/bshk-app/agentvault/releases/download/${VERSION}/$(basename "$TARBALL")"
 
 cat <<EOF
 
@@ -81,11 +93,11 @@ done.
   manifest : $DIST/manifest.json   (written by zamokctl package)
 
 Next — host the tarball, then publish the Homebrew cask (artifact already hosted → --store url):
-  gh release create ${VERSION} "$TARBALL" --repo beshkenadze/agentvault   # or: gh release upload ${VERSION} "$TARBALL"
+  gh release create ${VERSION} "$TARBALL" --repo bshk-app/agentvault   # or: gh release upload ${VERSION} "$TARBALL"
   GITHUB_TOKEN=\$(gh auth token) zamokctl cask \\
     --manifest "$DIST/manifest.json" \\
     --metadata packaging/agentvault-cask.json \\
     --store url --url "$URL" \\
-    --tap beshkenadze/homebrew-tap
-  brew install --cask beshkenadze/tap/agentvault   # av version → key should show: enclave
+    --tap bshk-app/homebrew-tap
+  brew install --cask bshk-app/homebrew-tap/agentvault   # av version → key should show: enclave
 EOF

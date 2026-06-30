@@ -40,7 +40,7 @@ profile; `av` ships as a bare, signed binary.
    An app-specific password comes from appleid.apple.com → Sign-In & Security.
 
 3. **App ID + Developer ID provisioning profile** (for the Enclave):
-   - developer.apple.com → Identifiers → register App ID `com.beshkenadze.agentvault`.
+   - developer.apple.com → Identifiers → register App ID `app.bshk.agentvault`.
    - Profiles → **Developer ID** → create a profile for that App ID → download.
    - Save it to `packaging/agentvault.provisionprofile` (git-ignored — account-specific).
 
@@ -66,7 +66,7 @@ Inputs it expects:
 - `packaging/avd.entitlements.template` — `__TEAM_ID__` → `com.apple.application-identifier`
   + `keychain-access-groups`.
 - `packaging/avd.app.Info.plist.template` — `__VERSION__`; `CFBundleIdentifier`
-  `com.beshkenadze.agentvault` (must match the entitlement suffix).
+  `app.bshk.agentvault` (must match the entitlement suffix).
 - `packaging/agentvault.provisionprofile` — your downloaded Developer ID profile.
 
 Output (under `dist/`, git-ignored): a signed bare `av`, a signed+stapled
@@ -79,7 +79,7 @@ stripped → keychain tier (and re-triggers Gatekeeper). A signed release must t
 a Homebrew **Cask** that carries the notarized artifact.
 
 Keep both: the Formula is the build-from-source / keychain-tier path; the
-[Cask](https://github.com/beshkenadze/homebrew-tap) ships the signed / Enclave-tier
+[Cask](https://github.com/bshk-app/homebrew-tap) ships the signed / Enclave-tier
 artifact. The tier is chosen at runtime, so installing the Cask upgrades protection with
 no config change.
 
@@ -90,17 +90,17 @@ passthrough, so the tarball stays in AgentVault's own GitHub release (no re-uplo
 
 ```sh
 # 1. publish the tarball to the GitHub release (if not already):
-gh release create v0.3.0 dist/agentvault-v0.3.0-macos.tar.gz --repo beshkenadze/agentvault
+gh release create v0.3.0 dist/agentvault-v0.3.0-macos.tar.gz --repo bshk-app/agentvault
 #    (or, on an existing release: gh release upload v0.3.0 dist/agentvault-v0.3.0-macos.tar.gz)
 
 # 2. render + push Casks/agentvault.rb to the tap (needs GITHUB_TOKEN):
 zamokctl cask \
   --manifest dist/manifest.json \
   --metadata packaging/agentvault-cask.json \
-  --store url --url "https://github.com/beshkenadze/agentvault/releases/download/v0.3.0/agentvault-v0.3.0-macos.tar.gz" \
-  --tap-host github --tap beshkenadze/homebrew-tap
+  --store url --url "https://github.com/bshk-app/agentvault/releases/download/v0.3.0/agentvault-v0.3.0-macos.tar.gz" \
+  --tap-host github --tap bshk-app/homebrew-tap
 
-# 3. brew install --cask beshkenadze/tap/agentvault  then  av version → key  enclave
+# 3. brew install --cask bshk-app/homebrew-tap/agentvault  then  av version → key  enclave
 ```
 
 The script prints this exact command (with the real version/url filled in) at the end of a
@@ -124,7 +124,7 @@ On Enclave hardware, `av setup` then `av version` should report `key  enclave`.
   isn't authorizing `com.apple.application-identifier`. Check
   `codesign -d --entitlements - dist/AgentVault.app` lists it, and that
   `dist/AgentVault.app/Contents/embedded.provisionprofile` is your **Developer ID** profile
-  for `com.beshkenadze.agentvault`.
+  for `app.bshk.agentvault`.
 - **"works in Xcode, not from the notarized build"** — the classic missing-profile symptom;
   Xcode embeds a profile for you but a standalone build does not. The bundle + profile here
   is what replaces that.
