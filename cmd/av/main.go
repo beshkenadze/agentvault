@@ -70,6 +70,8 @@ func main() {
 		runInit(os.Args[2:])
 	case "setup":
 		runSetup(os.Args[2:])
+	case "service":
+		runService(os.Args[2:])
 	case "version":
 		runVersion()
 	default:
@@ -79,7 +81,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
+	fmt.Fprintln(os.Stderr, "usage:\n  av ping\n  av run [--profile P] -- cmd args...\n  av env [--env-file PATH] [--profile P] [--no-mask] -- cmd args...  (run cmd with .env av:// refs resolved + injected)\n  av read [--backend file | --profile P] NAME  (TTY only; default reads av://file/NAME, no manifest)\n  av add [--backend file] NAME  (value from stdin or a TTY prompt; NEVER an argument)\n  av rm  [--backend file] NAME\n  av setup [--rotate] [--keychain|--enclave|--require-enclave|--plaintext]  (provision the local age vault; auto-picks the best tier)\n  av init --agent claude-code|generic [--dir D] [--force]  (generate adapter files)\n  av service on|off|status  (start avd at login; manage in System Settings → Login Items)\n  av unlock\n  av lock\n  av status\n  av scrub  (filters stdin -> stdout)\n  av version  (prints av/avd versions + active key tier)")
 }
 
 func runPing() {
@@ -652,6 +654,45 @@ func parseSetupArgs(args []string) (ipc.SetupParams, error) {
 		return p, fmt.Errorf("conflicting tier flags: --plaintext with --%s", p.Tier)
 	}
 	return p, nil
+}
+
+// parseServiceAction maps the user-facing verb to the RPC action. on->enable,
+// off->disable, status->status. Exactly one arg; anything else is a usage error.
+func parseServiceAction(args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("usage: av service on|off|status")
+	}
+	switch args[0] {
+	case "on":
+		return "enable", nil
+	case "off":
+		return "disable", nil
+	case "status":
+		return "status", nil
+	default:
+		return "", fmt.Errorf("unknown service command %q (want on|off|status)", args[0])
+	}
+}
+
+// runService implements `av service on|off|status`: a thin RPC to avd, which owns
+// the registration (SMAppService resolves the plist relative to avd's bundle). It
+// prints the backend + resulting state and, on requires-approval, points the user to
+// System Settings → Login Items.
+func runService(args []string) {
+	action, err := parseServiceAction(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "av:", err)
+		usage()
+		os.Exit(exitBadRequest)
+	}
+	res, err := dialClient().Service(action)
+	if err != nil {
+		os.Exit(exitForError(err))
+	}
+	fmt.Printf("login item (%s): %s\n", res.Backend, res.State)
+	if res.State == "requires-approval" {
+		fmt.Println("approve it in System Settings → General → Login Items (Allow in the Background).")
+	}
 }
 
 // runRm implements `av rm [--backend file] NAME`: it deletes NAME from the writable

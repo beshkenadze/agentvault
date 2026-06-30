@@ -342,6 +342,26 @@ func (c *Client) Setup(p ipc.SetupParams) (ipc.SetupResult, error) {
 	return r, nil
 }
 
+// Service issues the "service" RPC (action: "enable" | "disable" | "status") to
+// manage avd's login-item registration, returning the active backend + resulting
+// State. SECURITY: ServiceParams/ServiceResult carry no secret. enable/disable are
+// the only mutating actions; status is read-only.
+func (c *Client) Service(action string) (ipc.ServiceResult, error) {
+	pb, _ := json.Marshal(ipc.ServiceParams{Action: action})
+	resp, err := c.call(ipc.Request{ID: 1, Method: "service", Params: pb})
+	if err != nil {
+		return ipc.ServiceResult{}, err
+	}
+	if resp.Error != nil {
+		return ipc.ServiceResult{}, resp.Error
+	}
+	var r ipc.ServiceResult
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		return ipc.ServiceResult{}, err
+	}
+	return r, nil
+}
+
 // Version issues the "version" RPC and returns avd's build version plus the active
 // identity-protection tier and Enclave availability. SECURITY: VersionResult is pure
 // metadata (no value field), so this reply can never carry a secret. On a daemon error
