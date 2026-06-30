@@ -20,17 +20,29 @@ func autostart(socketPath string) error {
 	bin := os.Getenv("AV_AVD_PATH")
 	if bin == "" {
 		if self, err := os.Executable(); err == nil {
-			cand := filepath.Join(filepath.Dir(self), "avd")
-			if _, err := os.Stat(cand); err == nil {
-				bin = cand
-			}
+			bin = resolveAvdPath(filepath.Dir(self))
+		} else {
+			bin = "avd"
 		}
-	}
-	if bin == "" {
-		bin = "avd" // PATH
 	}
 	cmd := exec.Command(bin)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	return cmd.Start() // detached: do not Wait
+}
+
+// resolveAvdPath finds the avd binary next to the running av. Order: a sibling
+// `avd` (dev / formula layout), then the cask bundle layout
+// `<dir>/AgentVault.app/Contents/MacOS/avd`, else "avd" on PATH. Pure (takes the
+// dir) so the candidate order is unit-testable.
+func resolveAvdPath(selfDir string) string {
+	for _, cand := range []string{
+		filepath.Join(selfDir, "avd"),
+		filepath.Join(selfDir, "AgentVault.app", "Contents", "MacOS", "avd"),
+	} {
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return "avd" // PATH
 }
